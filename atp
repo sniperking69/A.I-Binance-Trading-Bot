@@ -1,0 +1,263 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Jan  8 06:16:20 2024
+
+@author: azzy
+"""
+from keys import *
+# importing keys
+import multiprocessing
+import pandas as pd
+import numpy as np #computing multidimensionla arrays
+import datetime
+from time import sleep
+from binance import *
+from binance.enums import *
+import math
+import pandas_ta as ta
+import operator
+import os
+import sys
+import ast
+globalInterval=Client.KLINE_INTERVAL_15MINUTE
+########close/open trades###########
+def Lsafe(client,Seed,mrgType,lvrg):
+    try:
+        client.futures_change_leverage(symbol=Seed,leverage=lvrg)
+        client.futures_change_margin_type(symbol=Seed,marginType=mrgType)
+    except:
+        return
+#Precession
+def truncate(f, n):
+    return round(f,n)
+#Order System
+def LongOrder(client,Seed,precision,percent,lvrg):
+    balance = client.futures_account_balance()
+    bal=None
+    for wc in balance:
+        if wc["asset"]=='USDT':
+            bal=float(wc["balance"])
+    price = client.futures_mark_price(symbol=Seed)["markPrice"]
+    maxl=(bal*percent) * lvrg
+    maxq=maxl/ float(price)
+    q=truncate(maxq,precision)
+    try:
+        client.futures_create_order(symbol=Seed,type=ORDER_TYPE_MARKET,side=SIDE_BUY,quantity=str(q))
+        return str(q)
+    except:
+        return "null"
+def ShortOrder(client,Seed,precision,percent,lvrg):
+    balance = client.futures_account_balance()
+    bal=None
+    for wc in balance:
+        if wc["asset"]=='USDT':
+            bal=float(wc["balance"])
+    price = client.futures_mark_price(symbol=Seed)["markPrice"]
+    maxl=(bal*percent) * lvrg
+    maxq=maxl/ float(price)
+    q=truncate(maxq,precision)
+    try:
+        client.futures_create_order(symbol=Seed,type=ORDER_TYPE_MARKET,side=SIDE_SELL,quantity=str(q))
+        return str(q)
+    except:
+        return "null"
+
+def closeLong(p,Seed):
+    try:
+        client.futures_create_order(symbol=Seed,type=ORDER_TYPE_MARKET,side=SIDE_SELL,quantity=p,reduceOnly='true')
+    except Exception as e:
+        print("exception order Error",e)
+def closeShort(p,Seed):
+    try:
+        client.futures_create_order(symbol=Seed,type=ORDER_TYPE_MARKET,side=SIDE_BUY,quantity=p,reduceOnly='true')
+    except Exception as e:
+        print("exception order Error",e)
+########close/open trades###########
+
+#################### Get token info #########################
+#collectes data on all tokens and gives out a ranked list of tokens to trade with
+def batchCollector(numBots,excludedlist,CurrencyType):
+    client = Client(api_key, api_secret)
+    exInfo=client.futures_exchange_info()
+    tokenInf,sinf=FindNewToken(client,exInfo,excludedlist,CurrencyType)
+    Ftoken_list=OpenLayer(tokenInf)
+    return Ftoken_list
+def TokenInfo(client,sym,CurrencyType):
+    while True:
+        try:
+            candles = client.futures_continous_klines(pair=sym, interval=globalInterval,ContractType='PERPETUAL')
+            df = pd.DataFrame(candles)
+            df.columns = ['timestart', 'open', 'high', 'low', 'close', 'volume', 'timeend', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'unused_field']
+            df['timestart'] = df['timestart'] / 1000
+            df['timeend'] = df['timeend'] / 1000
+            df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']] = df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']].astype(float)
+        except Exception as e:
+            #TokenInfo error Removed from Market or not added yet
+            #print("TokenInfo error Removed from Market or not added yet",e)
+            continue
+        return df
+
+def FindNewToken(client,exInfo,excludedlist,CurrencyType):
+    symInfo={}
+    tokenInfo={}
+    for symbol in exInfo["symbols"]:
+        if symbol["contractType"]=="PERPETUAL" and symbol["symbol"] not in excludedlist and CurrencyType in symbol["symbol"]:
+            symInfo[symbol["symbol"]]=symbol["quantityPrecision"]
+    for key,values in symInfo.items():
+        result=TokenInfo(client,key,CurrencyType)
+        tokenInfo[key]=result
+    return tokenInfo,symInfo
+
+def OpenLayer(TokenInfo):
+    fresult={}
+    trade_types=['GL','GS','TL','TS']
+    for Ti,value in TokenInfo.items():
+        try:
+            TZSCORE=zscore(value)
+            TCMF=CMF(value)
+            TMACD=MACD(value)
+            TRSI=rsi(value)
+            for ttype in trade_types:
+                range_rsi=ast.literal_eval(read_matching_cell('RSI', ttype))[0]
+                range_cmf=ast.literal_eval(read_matching_cell('CMF', ttype))[0]
+                range_macd=ast.literal_eval(read_matching_cell('MACD', ttype))[0]
+                range_zscore=ast.literal_eval(read_matching_cell('ZSCORE', ttype))[0]
+                if is_between(range_rsi, TRSI) and is_between(range_cmf, TCMF) and is_between(range_zscore, TZSCORE) and is_between(range_macd, TMACD):
+                    fresult[Ti] = ttype
+                    break
+        except Exception as e:
+            #TokenInfo error Removed from Market or not added yet
+            #print("TokenInfo error Removed from Market or not added yet",e)
+            continue
+    return fresult
+
+def CloseLayer(TokenData,ttype):
+    range_rsi=ast.literal_eval(read_matching_cell('RSI', ttype))[1]
+    range_cmf=ast.literal_eval(read_matching_cell('CMF', ttype))[1]
+    range_macd=ast.literal_eval(read_matching_cell('MACD', ttype))[1]
+    range_zscore=ast.literal_eval(read_matching_cell('ZSCORE', ttype))[1]
+    if is_between(range_rsi, TRSI) or is_between(range_cmf, TCMF) or is_between(range_zscore, TZSCORE) or is_between(range_macd, TMACD):
+        return True
+    return False
+#################### Get token info #########################
+
+############# Indicators #############
+def MACD(dataset):
+    # Calculate MACD using pandas_ta library
+    macd_data = dataset.ta.macd(fast=12, slow=26, signal=9)
+
+    # Extract MACD and MACD Signal lines
+    macds = macd_data["MACDs_12_26_9"]
+
+    # Get the latest values of MACD and MACD Signal
+    latest_macds = round(macds.iloc[-1], 2)
+    return latest_macds
+def CMF(data):
+    period = 20
+    mf = ((data['close'] - data['low']) - (data['high'] - data['close'])) / (data['high'] - data['low'])
+    mfv = mf * data['volume']
+    cmf_values = mfv.rolling(period).sum() / data['volume'].rolling(period).sum()
+    return round(cmf_values.iloc[-1],2)
+def rsi(dataset):
+    S=dataset.ta.rsi(length=14)
+    rssi=round(S.iloc[-1],1)
+    return rssi
+def zscore(dataset):
+    zpoints=dataset.ta.zscore().dropna()
+    zscore=round(zpoints.iloc[-1],2)
+    return zscore
+############# Indicators #############
+
+
+########################database##############
+
+def check_or_create_csv():
+    if not os.path.exists('database.csv'):
+        # Create a DataFrame with the desired structure
+        data = {
+            'IND': ['RSI', 'CMF', 'ZSCORE', 'MACD', 'WL'],
+            'GL': ['[[30,35],[65,70]]', '[[-0.2,0],[0,0.2]]', '[[-1.5,-1],[1,1.5]]', '[[-0.2,0],[0,0.2]]', '[0,0]'],
+            'GS': ['[[65,70],[30,35]]', '[[0,0.2],[-0.2,0]]', '[[1,1.5],[-1.5,-1]]', '[[0,0.2],[-0.2,0]]', '[0,0]'],
+            'TL': ['[[70,75],[30,25]]', '[[0.2,0.5],[-0.5,-0.2]]', '[[1.5,2],[-2,-1.5]]', '[[0.2,0.5],[-0.5,-0.2]]', '[0,0]'],
+            'TS': ['[[30,25],[70,75]]', '[[-0.5,-0.2],[0.2,0.5]]', '[[-2,-1.5],[1.5,2]]', '[[-0.5,-0.2],[0.2,0.5]]', '[0,0]']
+        }
+        df = pd.DataFrame(data)
+
+        # Save the DataFrame to the CSV file
+        df.to_csv('database.csv', index=False)
+
+        return df
+    else:
+        df=pd.read_csv('database.csv')
+        return df
+
+def read_matching_cell(indicator, column_name):
+    df=check_or_create_csv()
+    # Find the row index where IND matches the given indicator
+    row_index = df.index[df['IND'] == indicator].tolist()
+
+    # Check if the indicator exists in the DataFrame
+    if not row_index:
+        print(f"Indicator '{indicator}' not found.")
+        return
+
+    # Get the column index where the column matches the given column_name
+    column_index = df.columns.get_loc(column_name)
+
+    # Print the cell value at the intersection of the row and column
+    cell_value = df.iloc[row_index[0], column_index]
+    return cell_value
+
+def update_cell(indicator, column_name, new_value):
+    df=check_or_create_csv()
+    # Find the row index where IND matches the given indicator
+    row_index = df.index[df['IND'] == indicator].tolist()
+
+    # Check if the indicator exists in the DataFrame
+    if not row_index:
+        print(f"Indicator '{indicator}' not found.")
+        return
+
+    # Get the column index where the column matches the given column_name
+    column_index = df.columns.get_loc(column_name)
+
+    # Update the cell value at the intersection of the row and column
+    df.iloc[row_index[0], column_index] = new_value
+
+    # Write the updated DataFrame back to the file
+    df.to_csv('database.csv', index=False)
+    return True
+
+########################database##############
+
+###############Logic###################
+
+def is_between(range_list, number):
+    # Check if the number is between the min and max values in the range list
+    return range_list[0] <= number <= range_list[1]
+
+#############Logic####################
+def simutrade(bList):
+    
+    for Ti,ttype in bList:
+        if
+        
+
+def monitorTrades():
+    pass
+
+
+########trainer############
+######### Real Trading #############
+def realtrade():
+    pass
+
+
+
+print("Booting up ".format(os.getpid()))
+excludedlist=['BTCUSDT','BTCDOMUSDT']
+CurrencyType="USDT"
+numBots=5
+print(batchCollector(numBots,excludedlist,CurrencyType))
+
+
