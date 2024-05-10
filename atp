@@ -135,18 +135,18 @@ def OpenLayer(TokenInfo):
             TTREND=super_trend(value)
             TRSI=rsi(value)
             for ttype in trade_types:
-                range_rsi=ast.literal_eval(read_matching_node('RSI', ttype))[0]
-                range_cmf=ast.literal_eval(read_matching_node('CMF', ttype))[0]
-                trend=ast.literal_eval(read_matching_node('TREND', ttype))[0]
-                range_zscore=ast.literal_eval(read_matching_node('ZSCORE', ttype))[0]
+                range_rsi=ast.literal_eval(read_matching_table('nodes','RSI', ttype))[0]
+                range_cmf=ast.literal_eval(read_matching_table('nodes','CMF', ttype))[0]
+                trend=ast.literal_eval(read_matching_table('nodes','TREND', ttype))[0]
+                range_zscore=ast.literal_eval(read_matching_table('nodes','ZSCORE', ttype))[0]
                 range_intensity=is_between(range_rsi,TRSI,range_cmf,TCMF,range_zscore,TZSCORE,TTREND,trend,ttype)
-                pressurelist[ttype]=range_intensity
+                pressurelist[ttype]=round((range_intensity+TZSCORE),2)
         except Exception as e:
             #TokenInfo error Removed from Market or not added yet
             print("TokenInfo error Removed from Market or not added yet",e) 
         print(pressurelist)
         bestchoice=get_key_of_higher_number(pressurelist)
-        bias=float(read_matching_weight('bias', bestchoice))
+        bias=float(read_matching_table('weights','bias', bestchoice))
         if pressurelist[bestchoice]>bias:
             ranked_result[Ti]=[pressurelist[bestchoice],bestchoice]
     # Sort the keys based on the first element of the list in descending order
@@ -171,6 +171,21 @@ def get_key_of_higher_number(dictionary):
             highest_key = key
     # Return the key corresponding to the highest number
     return highest_key
+
+def get_key_of_lower_number(dictionary):
+    # Initialize variables to keep track of the lowest number and its corresponding key
+    lowest_number = float('inf')  # Start with a very high number
+    lowest_key = None
+
+    # Iterate through the dictionary
+    for key, value in dictionary.items():
+        # If the current value is lower than the lowest number found so far
+        if value < lowest_number:
+            lowest_number = value
+            lowest_key = key
+    # Return the key corresponding to the lowest number
+    return lowest_key
+
 def find_largest_number(pressurelist):
     # Initialize the maximum value to the smallest possible integer
     max_value = float('-inf')
@@ -183,13 +198,12 @@ def find_largest_number(pressurelist):
 
     return max_value
 def CloseLayer(TRSI,TCMF,TTREND,TZSCORE,ttype):
-    range_rsi=ast.literal_eval(read_matching_node('RSI', ttype))[1]
-    range_cmf=ast.literal_eval(read_matching_node('CMF', ttype))[1]
-    trend=ast.literal_eval(read_matching_node('TREND', ttype))[1]
-    range_zscore=ast.literal_eval(read_matching_node('ZSCORE', ttype))[1]
-    bias=float(read_matching_weight('bias', ttype))
+    range_rsi=ast.literal_eval(read_matching_table('nodes','RSI', ttype))[1]
+    range_cmf=ast.literal_eval(read_matching_table('nodes','CMF', ttype))[1]
+    trend=ast.literal_eval(read_matching_table('nodes','TREND', ttype))[1]
+    range_zscore=ast.literal_eval(read_matching_table('nodes','ZSCORE', ttype))[1]
+    bias=float(read_matching_table('weights','bias', ttype))
     edge_intensity=is_close(range_rsi,TRSI,range_cmf,TCMF,range_zscore,TZSCORE,TTREND,trend,ttype)
-    print(edge_intensity)
     if edge_intensity>bias:
         return True
     else:
@@ -200,10 +214,10 @@ def is_close(range_rsi,TRSI,range_cmf,TCMF,range_zscore,TZSCORE,TTREND,trend,tty
     CMF_intensity= intensity_from_edge(TCMF, range_cmf[0], range_cmf[1])
     ZSCORE_intensity= intensity_from_edge(TZSCORE, range_zscore[0], range_zscore[1])
     if trend==TTREND:
-        trend_w=ast.literal_eval(read_matching_weight('TREND', ttype))[0]
-        cmf_w=ast.literal_eval(read_matching_weight('CMF', ttype))[0]
-        zscore_w=ast.literal_eval(read_matching_weight('ZSCORE', ttype))[0]
-        rsi_w=ast.literal_eval(read_matching_weight('RSI', ttype))[0]
+        trend_w=ast.literal_eval(read_matching_table('weights','TREND', ttype))[0]
+        cmf_w=ast.literal_eval(read_matching_table('weights','CMF', ttype))[0]
+        zscore_w=ast.literal_eval(read_matching_table('weights','ZSCORE', ttype))[0]
+        rsi_w=ast.literal_eval(read_matching_table('weights','RSI', ttype))[0]
         average = round(((RSI_intensity*rsi_w) + (CMF_intensity*cmf_w) + (ZSCORE_intensity*zscore_w) + trend_w),3)
     else:
         return 0
@@ -215,14 +229,42 @@ def is_between(range_rsi,TRSI,range_cmf,TCMF,range_zscore,TZSCORE,TTREND,trend,t
     CMF_intensity= intensity_from_mid(TCMF, range_cmf[0], range_cmf[1])
     ZSCORE_intensity= intensity_from_mid(TZSCORE, range_zscore[0], range_zscore[1])
     if trend==TTREND:
-        trend_w=ast.literal_eval(read_matching_weight('TREND', ttype))[0]
-        cmf_w=ast.literal_eval(read_matching_weight('CMF', ttype))[0]
-        zscore_w=ast.literal_eval(read_matching_weight('ZSCORE', ttype))[0]
-        rsi_w=ast.literal_eval(read_matching_weight('RSI', ttype))[0]
+        trend_w=ast.literal_eval(read_matching_table('weights','TREND', ttype))[0]
+        cmf_w=ast.literal_eval(read_matching_table('weights','CMF', ttype))[0]
+        zscore_w=ast.literal_eval(read_matching_table('weights','ZSCORE', ttype))[0]
+        rsi_w=ast.literal_eval(read_matching_table('weights','RSI', ttype))[0]
         average = round(((RSI_intensity*rsi_w) + (CMF_intensity*cmf_w) + (ZSCORE_intensity*zscore_w) + trend_w),3)
     else:
         return 0
     return average
+
+
+#################### Get token info #########################
+
+############# Indicators #############
+def super_trend(df, period=7, multiplier=3.0):
+    supertrend = df.ta.supertrend(high='high', low='low', close='close', length=period, multiplier=multiplier)
+    df = pd.concat([df, supertrend], axis=1)
+    latest_trend = 1 if df.iloc[-1]['close'] > df.iloc[-1]['SUPERT_'+str(period)+"_"+str(multiplier)] else 0
+    return latest_trend
+
+def CMF(data):
+    period = 20
+    mf = ((data['close'] - data['low']) - (data['high'] - data['close'])) / (data['high'] - data['low'])
+    mfv = mf * data['volume']
+    cmf_values = mfv.rolling(period).sum() / data['volume'].rolling(period).sum()
+    return round(cmf_values.iloc[-1],3)
+
+def rsi(dataset):
+    S=dataset.ta.rsi(length=14)
+    rssi=round(S.iloc[-1],1)
+    return rssi
+
+def zscore(dataset):
+    zpoints=dataset.ta.zscore().dropna()
+    zscore=round(zpoints.iloc[-1],3)
+    return zscore
+
 
 def intensity_from_edge(number, range_start, range_end):
     # Sort the range automatically
@@ -252,7 +294,7 @@ def intensity_from_edge(number, range_start, range_end):
 
     return intensity
 
-def intensity_from_numbers_and_range(num1, num2, range_start, range_end):
+def same_side_check(num1, num2, range_start, range_end):
     # Sort the range automatically
     sorted_range = sorted([range_start, range_end])
     range_start, range_end = sorted_range[0], sorted_range[1]
@@ -267,25 +309,7 @@ def intensity_from_numbers_and_range(num1, num2, range_start, range_end):
     # Check if both num1 and num2 are above or below the midpoint
     both_above = num1 > midpoint and num2 > midpoint
     both_below = num1 < midpoint and num2 < midpoint
-
-    # Calculate the range
-    range_size = range_end - range_start
-
-    # Calculate the separation between the two numbers
-    separation = abs(num1 - num2)
-
-    # Calculate the intensity of separation (lower when closer)
-    separation_intensity =  (separation / range_size)
-
-    # Calculate the distance of each number from the ends of the range
-    num1_distance = min(abs(num1 - range_start), abs(num1 - range_end))
-    num2_distance = min(abs(num2 - range_start), abs(num2 - range_end))
-
-    # Calculate the intensity of each number's distance from the ends of the range (lower when closer to the edge)
-    num1_intensity = 1 - (num1_distance / range_size)
-    num2_intensity = 1 - (num2_distance / range_size)
-
-    return separation_intensity, num1_intensity, num2_intensity, both_above or both_below
+    return both_above or both_below
 
 def intensity_from_mid(number, range_start, range_end):
     # Sort the range automatically
@@ -312,62 +336,8 @@ def intensity_from_mid(number, range_start, range_end):
 
     return intensity
 
-#################### Get token info #########################
-
-############# Indicators #############
-def super_trend(df, period=7, multiplier=3.0):
-    supertrend = df.ta.supertrend(high='high', low='low', close='close', length=period, multiplier=multiplier)
-    df = pd.concat([df, supertrend], axis=1)
-    latest_trend = 1 if df.iloc[-1]['close'] > df.iloc[-1]['SUPERT_'+str(period)+"_"+str(multiplier)] else 0
-    return latest_trend
-
-def CMF(data):
-    period = 20
-    mf = ((data['close'] - data['low']) - (data['high'] - data['close'])) / (data['high'] - data['low'])
-    mfv = mf * data['volume']
-    cmf_values = mfv.rolling(period).sum() / data['volume'].rolling(period).sum()
-    return round(cmf_values.iloc[-1],2)
-
-def rsi(dataset):
-    S=dataset.ta.rsi(length=14)
-    rssi=round(S.iloc[-1],1)
-    return rssi
-
-def zscore(dataset):
-    zpoints=dataset.ta.zscore().dropna()
-    zscore=round(zpoints.iloc[-1],2)
-    return zscore
 ############# Indicators #############
 ########################database##############
-
-def add_to_node():
-    pass
-
-def subtract_to_node():
-    trend_w[0]=round(trend_w[0] - 0.01, 2)
-    rsi_w[0]=round(rsi_w[0] - 0.1, 2)
-    rsi_w[2][0]+=1
-    update_cell_weight('RSI', trade_type, rsi_w)
-    update_cell_weight('TREND', trade_type, trend_w)
-    cmf_w[0]=round(cmf_w[0] - 0.1, 2)
-    cmf_w[2][0]+=1
-    update_cell_weight('CMF', trade_type, cmf_w)
-    zscore_w[0]=round(zscore_w[0] - 0.1, 2)
-    zscore_w[2][0]+=1
-    update_cell_weight('ZSCORE', trade_type, zscore_w)
-    trend_w[1]=round(trend_w[1] - 0.1, 2)
-    rsi_w[1]=round(rsi_w[1] - 0.1, 2)
-    rsi_w[2][1]+=1
-    update_cell_weight('RSI', trade_type, rsi_w)
-    update_cell_weight('TREND', trade_type, trend_w)
-    cmf_w[1]=round(cmf_w[1] - 0.1, 2)
-    cmf_w[2][1]+=1
-    update_cell_weight('CMF', trade_type, cmf_w)
-    zscore_w[1]=round(zscore_w[1] - 0.1, 2)
-    zscore_w[2][1]+=1
-    update_cell_weight('ZSCORE', trade_type, zscore_w)
-    bias=round(bias + 0.5, 2)
-    update_cell_weight('bias', trade_type, bias)
 
 def nodes():
     if not os.path.exists('nodes.csv'):
@@ -385,15 +355,31 @@ def nodes():
     else:
         df=pd.read_csv('nodes.csv')
         return df
+def reflections():
+    if not os.path.exists('reflections.csv'):
+        # Create a DataFrame with the desired structure
+        data = {
+            'IND': ['RSI', 'CMF', 'ZSCORE', 'TREND','TNUM'],
+            'GL': ['[0,0]', '[0,0]', '[0,0]', '[0,0]','0'],
+            'GS': ['[0,0]', '[0,0]', '[0,0]', '[0,0]','0'],
+            'TL': ['[0,0]', '[0,0]', '[0,0]', '[0,0]','0'],
+            'TS': ['[0,0]', '[0,0]', '[0,0]', '[0,0]','0']
+            }
+        df = pd.DataFrame(data)
+        df.to_csv('reflections.csv', index=False)
+        return df
+    else:
+        df=pd.read_csv('reflection.csv')
+        return df
 def weights():
     if not os.path.exists('weights.csv'):
         # Create a DataFrame with the desired structure '[1,1]', '[1,1]', '[1,1]', '[1,1]',
         data = {
-            'IND': ['RSI', 'CMF', 'ZSCORE', 'TREND','bias','int'],
-            'GL': ['[1,1,[0,0]]', '[1,1,[0,0]]', '[1,1,[0,0]]', '[0,0]','0.5','0'],
-            'GS': ['[1,1,[0,0]]', '[1,1,[0,0]]', '[1,1,[0,0]]', '[0,0]','0.5','0'],
-            'TL': ['[1,1,[0,0]]', '[1,1,[0,0]]', '[1,1,[0,0]]', '[0,0]', '0.5','0'],
-            'TS': ['[1,1,[0,0]]', '[1,1,[0,0]]', '[1,1,[0,0]]', '[0,0]','0.5','0']
+            'IND': ['RSI', 'CMF', 'ZSCORE', 'TREND','bias'],
+            'GL': ['[1,1]', '[1,1]', '[1,1]', '[0,0]','0.5'],
+            'GS': ['[1,1]', '[1,1]', '[1,1]', '[0,0]','0.5'],
+            'TL': ['[1,1]', '[1,1]', '[1,1]', '[0,0]', '0.5'],
+            'TS': ['[1,1]', '[1,1]', '[1,1]', '[0,0]','0.5']
             }
         df = pd.DataFrame(data)
         df.to_csv('weights.csv', index=False)
@@ -401,47 +387,59 @@ def weights():
     else:
         df=pd.read_csv('weights.csv')
         return df
-def read_matching_node(indicator, column_name):
-    df=nodes()
-    row_index = df.index[df['IND'] == indicator].tolist()
-    if not row_index:
-        print(f"Indicator '{indicator}' not found.")
-        return
-    column_index = df.columns.get_loc(column_name)
-    cell_value = df.iloc[row_index[0], column_index]
-    return cell_value
+    
+def read_matching_table(table,indicator, column_name):
+    if table=='nodes':   
+        df=nodes()
+        row_index = df.index[df['IND'] == indicator].tolist()
+        if not row_index:
+            print(f"Indicator '{indicator}' not found.")
+            return
+        column_index = df.columns.get_loc(column_name)
+        cell_value = df.iloc[row_index[0], column_index]
+        return cell_value
+    if table=='weights':
+        df=weights()
+        row_index = df.index[df['IND'] == indicator].tolist()
+        if not row_index:
+            print(f"Indicator '{indicator}' not found.")
+            return
+        column_index = df.columns.get_loc(column_name)
+        cell_value = df.iloc[row_index[0], column_index]
+        return cell_value
 
-def read_matching_weight(indicator, column_name):
-    df=weights()
-    row_index = df.index[df['IND'] == indicator].tolist()
-    if not row_index:
-        print(f"Indicator '{indicator}' not found.")
-        return
-    column_index = df.columns.get_loc(column_name)
-    cell_value = df.iloc[row_index[0], column_index]
-    return cell_value
 
-def update_cell_node(indicator, column_name, new_value):
-    df=nodes()
-    row_index = df.index[df['IND'] == indicator].tolist()
-    if not row_index:
-        print(f"Indicator '{indicator}' not found.")
-        return
-    column_index = df.columns.get_loc(column_name)
-    df.iloc[row_index[0], column_index] = new_value
-    df.to_csv('nodes.csv', index=False)
-    return True
-
-def update_cell_weight(indicator, column_name, new_value):
-    df=weights()
-    row_index = df.index[df['IND'] == indicator].tolist()
-    if not row_index:
-        print(f"Indicator '{indicator}' not found.")
-        return
-    column_index = df.columns.get_loc(column_name)
-    df.iloc[row_index[0], column_index] = new_value
-    df.to_csv('weights.csv', index=False)
-    return True
+def update_cell_table(table,indicator, column_name, new_value):
+    if table=='nodes':
+        df=nodes()
+        row_index = df.index[df['IND'] == indicator].tolist()
+        if not row_index:
+            print(f"Indicator '{indicator}' not found.")
+            return
+        column_index = df.columns.get_loc(column_name)
+        df.iloc[row_index[0], column_index] = new_value
+        df.to_csv('nodes.csv', index=False)
+        return True
+    if table=='weights':
+        df=weights()
+        row_index = df.index[df['IND'] == indicator].tolist()
+        if not row_index:
+            print(f"Indicator '{indicator}' not found.")
+            return
+        column_index = df.columns.get_loc(column_name)
+        df.iloc[row_index[0], column_index] = new_value
+        df.to_csv('weights.csv', index=False)
+        return True
+    if table=='reflections':
+        df=weights()
+        row_index = df.index[df['IND'] == indicator].tolist()
+        if not row_index:
+            print(f"Indicator '{indicator}' not found.")
+            return
+        column_index = df.columns.get_loc(column_name)
+        df.iloc[row_index[0], column_index] = new_value
+        df.to_csv('reflections.csv', index=False)
+        return True
 
 def multiTokenHistory():
     if not os.path.exists('multiTokenHistory.csv'):
@@ -583,142 +581,158 @@ def Evaluate_Trades():
     for index,item in TLog.iterrows():
         the_token=item['token']
         trade_type=item['type']
-        opprice=item['opprice']
         trade_result=item['result']
         tokenhistory=filter_multi_trade('token', the_token)
         if trade_result=="L":
-            if trade_type=='GS' or trade_type=='TS':
-                smallest_value = tokenhistory['price'].min()
-                largest_value = tokenhistory['price'].max()
-                row_with_smallest_value = tokenhistory.loc[tokenhistory['price'] == smallest_value]
-                row_with_largest_value=tokenhistory.loc[tokenhistory['price'] == largest_value]
-                separation_intensity, num1_intensity, num2_intensity, both_above_or_below = intensity_from_numbers_and_range(row_with_largest_value, row_with_smallest_value, 0, len(tokenhistory))
-                if both_above_or_below==False:
-                    avg_int=round((separation_intensity + num1_intensity + num2_intensity) / 3,2)
-                    update_cell_weight('bias', trade_type, '0.5')
-                    bias=float(read_matching_weight('bias', trade_type))
-            if trade_type=='GL' or trade_type=='TL':
-                largest_value = tokenhistory['price'].max()
-                row_with_largest_value = tokenhistory.loc[tokenhistory['price'] == smallest_value]
-                if largest_value > opprice:
-                    total_rows=len(tokenhistory)
-                    midpoint = total_rows // 2
-                    if row_with_largest_value < midpoint:
-                        upperhalf__update()
-                    else:
-                        lowerhalf_update()
-    check_weights()    
+            smallest_value = tokenhistory['price'].min()
+            largest_value = tokenhistory['price'].max()
+            row_with_smallest_value = tokenhistory.loc[tokenhistory['price'] == smallest_value]
+            row_with_largest_value=tokenhistory.loc[tokenhistory['price'] == largest_value]
+            both_above_or_below = same_side_check(row_with_largest_value, row_with_smallest_value, 0, len(tokenhistory))
+            if both_above_or_below==False:
+                fcompare={}
+                trade_types=["GL","TL","GS","TS"]
+                if row_with_smallest_value<row_with_largest_value:
+                    pressurelist={}
+                    for ttype in trade_types:
+                        #opening side
+                        range_rsi=ast.literal_eval(read_matching_table('nodes','RSI', ttype))
+                        range_cmf=ast.literal_eval(read_matching_table('nodes','CMF', ttype))
+                        range_zscore=ast.literal_eval(read_matching_table('nodes','ZSCORE', ttype))
+                        TZSCORE=tokenhistory['ZSCORE'][row_with_smallest_value]
+                        TCMF=tokenhistory['CMF'][row_with_smallest_value]
+                        TRSI=tokenhistory['RSI'][row_with_smallest_value]
+                        opening_intensity=eval_close(range_rsi[0],TRSI,range_cmf[0],TCMF,range_zscore[0],TZSCORE)
+                        #closing side
+                        TZSCORE=tokenhistory['ZSCORE'][row_with_largest_value]
+                        TCMF=tokenhistory['CMF'][row_with_largest_value]
+                        TRSI=tokenhistory['RSI'][row_with_largest_value]
+                        close_intensity=eval_close(range_rsi[1],TRSI,range_cmf[1],TCMF,range_zscore[1],TZSCORE)
+                        pressurelist[ttype]=(opening_intensity+close_intensity)/2
+                    bestchoice=get_key_of_higher_number(pressurelist)
+                    bias=float(read_matching_table('weights','bias', bestchoice))
+                    if pressurelist[bestchoice]>bias:
+                        fcompare['LONG']=[pressurelist[bestchoice],bestchoice]
+                else:
+                    pressurelist={}
+                    for ttype in trade_types:
+                        #opening side
+                        range_rsi=ast.literal_eval(read_matching_table('nodes','RSI', ttype))
+                        range_cmf=ast.literal_eval(read_matching_table('nodes','CMF', ttype))
+                        range_zscore=ast.literal_eval(read_matching_table('nodes','ZSCORE', ttype))
+                        TZSCORE=tokenhistory['ZSCORE'][row_with_largest_value]
+                        TCMF=tokenhistory['CMF'][row_with_largest_value]
+                        TRSI=tokenhistory['RSI'][row_with_largest_value]
+                        opening_intensity=eval_close(range_rsi[0],TRSI,range_cmf[0],TCMF,range_zscore[0],TZSCORE)
+                        #closing side
+                        TZSCORE=tokenhistory['ZSCORE'][row_with_smallest_value]
+                        TCMF=tokenhistory['CMF'][row_with_smallest_value]
+                        TRSI=tokenhistory['RSI'][row_with_smallest_value]
+                        close_intensity=eval_close(range_rsi[1],TRSI,range_cmf[1],TCMF,range_zscore[1],TZSCORE)
+                        pressurelist[ttype]=round((opening_intensity+close_intensity)/2,3)
+                    bestchoice= get_key_of_lower_number(pressurelist)
+                    if pressurelist[bestchoice]>bias:
+                        fcompare['SHORT']=[pressurelist[bestchoice],bestchoice]
+            if fcompare['LONG'][0]<fcompare['SHORT'][0]:
+                TZSCORE_o=tokenhistory['ZSCORE'][row_with_smallest_value]
+                TCMF_o=tokenhistory['CMF'][row_with_smallest_value]
+                TTREND_o=tokenhistory['TREND'][row_with_smallest_value]
+                TRSI_o=tokenhistory['RSI'][row_with_smallest_value]
+                TZSCORE_c=tokenhistory['ZSCORE'][row_with_largest_value]
+                TCMF_c=tokenhistory['CMF'][row_with_largest_value]
+                TTREND_c=tokenhistory['TREND'][row_with_largest_value]
+                TRSI_c=tokenhistory['RSI'][row_with_largest_value]
+                updatereflections(TZSCORE_o,TCMF_o,TRSI_o,TTREND_o,TZSCORE_c,TCMF_c,TTREND_c,TRSI_c,fcompare['LONG'][1])
+                update_weights(trade_type)
+            else:
+                TZSCORE_c=tokenhistory['ZSCORE'][row_with_smallest_value]
+                TCMF_c=tokenhistory['CMF'][row_with_smallest_value]
+                TTREND_c=tokenhistory['TREND'][row_with_smallest_value]
+                TRSI_c=tokenhistory['RSI'][row_with_smallest_value]
+                TZSCORE_o=tokenhistory['ZSCORE'][row_with_largest_value]
+                TCMF_o=tokenhistory['CMF'][row_with_largest_value]
+                TTREND_o=tokenhistory['TREND'][row_with_largest_value]
+                TRSI_o=tokenhistory['RSI'][row_with_largest_value]
+                updatereflections(TZSCORE_o,TCMF_o,TRSI_o,TTREND_o,TZSCORE_c,TCMF_c,TTREND_c,TRSI_c,fcompare['SHORT'][1])
+                update_weights(trade_type)
+               
+def running_average(previous_avg, new_number, total_items):
+    if total_items == 0:
+        return new_number
+    else:
+        return (previous_avg * total_items + new_number) / (total_items + 1)  
+             
+def updatereflections(TZSCORE_o,TCMF_o,TRSI_o,TTREND_o,TZSCORE_c,TCMF_c,TTREND_c,TRSI_c,ttype):
+    range_rsi=ast.literal_eval(read_matching_table('relfections','RSI', ttype))
+    range_cmf=ast.literal_eval(read_matching_table('reflections','CMF', ttype))
+    trend=ast.literal_eval(read_matching_table('reflections','TREND', ttype))
+    range_zscore=ast.literal_eval(read_matching_table('reflections','ZSCORE', ttype))
+    TNUM=ast.literal_eval(read_matching_table('reflections','TNUM', ttype))
+    range_rsi=[running_average(range_rsi[0], TRSI_o, TNUM),running_average(range_rsi[1], TRSI_c, TNUM)]
+    range_cmf=[running_average(range_cmf[0], TCMF_o, TNUM),running_average(range_cmf[1], TCMF_c, TNUM)]
+    range_zscore=[running_average(range_zscore[0], TZSCORE_o, TNUM),running_average(range_zscore[1], TZSCORE_c, TNUM)]
+    trend=[running_average(trend[0], TTREND_o, TNUM),running_average(trend[1], TTREND_c, TNUM)]
+    update_cell_table('reflections','RSI', ttype, range_rsi)
+    update_cell_table('reflections','ZSCORE', ttype, range_zscore)
+    update_cell_table('reflections','CMF', ttype, range_cmf)
+    update_cell_table('reflections','TREND', ttype, trend)
+         
+def range_intensity_scaled(range_list, number, max_distance=20):
+    # Unpack the range
+    start, end = range_list
     
-def upperhalf__update():
-    trend_w=ast.literal_eval(read_matching_weight('TREND', trade_type))
-    cmf_w=ast.literal_eval(read_matching_weight('CMF',trade_type))
-    zscore_w=ast.literal_eval(read_matching_weight('ZSCORE',trade_type))
-    rsi_w=ast.literal_eval(read_matching_weight('RSI', trade_type))
-    bias=float(read_matching_weight('bias', trade_type))
-    pass
-
-def lowerhalf_update():
-    pass
-
+    # Check if the number is within the range
+    if start <= number <= end:
+        return False
+    else:
+        # Calculate the distance to the closest range boundary
+        distance_to_start = abs(start - number)
+        distance_to_end = abs(end - number)
+        min_distance = min(distance_to_start, distance_to_end)
+        
+        # Scale the distance to a value between 0 and 1
+        # Ensure that the maximum distance caps at 1 by using min function
+        return min(min_distance / max_distance, 1)
+    
+def eval_close(range_rsi,TRSI,range_cmf,TCMF,range_zscore,TZSCORE):
+    rsi_int=range_intensity_scaled(range_rsi,TRSI)
+    cmf_int=range_intensity_scaled(range_cmf,TCMF)
+    zscore_int=range_intensity_scaled(range_zscore,TZSCORE)
+    if rsi_int != False and cmf_int != False and zscore_int != False:
+        result = round((rsi_int + cmf_int + zscore_int) / 3 , 3)
+        return result
+    else:
+        return False
+        
+def update_weights(trade_type):
+    trend_w=ast.literal_eval(read_matching_table('weights','TREND', trade_type))
+    cmf_w=ast.literal_eval(read_matching_table('weights','CMF',trade_type))
+    zscore_w=ast.literal_eval(read_matching_table('weights','ZSCORE',trade_type))
+    rsi_w=ast.literal_eval(read_matching_table('weights','RSI', trade_type))
+    trend_w[0]=round(trend_w[0] - 0.1, 2)
+    rsi_w[0]=round(rsi_w[0] - 0.1, 2)
+    update_cell_table('weights','RSI', trade_type, rsi_w)
+    update_cell_table('weights','TREND', trade_type, trend_w)
+    cmf_w[0]=round(cmf_w[0] - 0.1, 2)
+    update_cell_table('weights','CMF', trade_type, cmf_w)
+    zscore_w[0]=round(zscore_w[0] - 0.1, 2)
+    update_cell_table('weights','ZSCORE', trade_type, zscore_w)
+    trend_w[1]=round(trend_w[1] - 0.1, 2)
+    rsi_w[1]=round(rsi_w[1] - 0.1, 2)
+    update_cell_table('weights','RSI', trade_type, rsi_w)
+    update_cell_table('weights','TREND', trade_type, trend_w)
+    cmf_w[1]=round(cmf_w[1] - 0.1, 2)
+    update_cell_table('weights','CMF', trade_type, cmf_w)
+    zscore_w[1]=round(zscore_w[1] - 0.1, 2)
+    update_cell_table('weights','ZSCORE', trade_type, zscore_w)
+    
 def check_weights():
-    trigger=0.6
-    trade_types=['GL','GS','TL','TS']
-    for trade_type in trade_types:
-        range_rsi=ast.literal_eval(read_matching_node('RSI', trade_type))
-        range_cmf=ast.literal_eval(read_matching_node('CMF', trade_type))
-        trend=ast.literal_eval(read_matching_node('TREND', trade_type))
-        range_zscore=ast.literal_eval(read_matching_node('ZSCORE', trade_type))
-        trend_w=ast.literal_eval(read_matching_weight('TREND', trade_type))
-        cmf_w=ast.literal_eval(read_matching_weight('CMF',trade_type))
-        zscore_w=ast.literal_eval(read_matching_weight('ZSCORE',trade_type))
-        rsi_w=ast.literal_eval(read_matching_weight('RSI', trade_type))
-        if trend_w[0]<trigger or trend_w[1]<trigger:
-            trend=read_matching_node('TREND', trade_type)
-            if trend_w[2][0]>trend_w[2][1]:
-                if trend[1]==1:
-                    trend[1]=0
-                else:
-                    trend[1]=1
-                update_cell_weight('bias', trade_type, '0.5')
-            if trend_w[2][0]<trend_w[2][1]:
-                if trend[0]==1:
-                    trend[0]=0
-                else:
-                    trend[0]=1
-                update_cell_node('TREND', trade_type,trend)
-                update_cell_weight('bias', trade_type, '0.5')
-        if cmf_w[0]<trigger or cmf_w[1]<trigger:
-            range_cmf=ast.literal_eval(read_matching_node('CMF', trade_type))
-            if cmf_w[2][0]>cmf_w[2][1]:
-                if cmf_w[3][0]>range_cmf[0]:
-                    new_range=[round(range_cmf[1][1]-0.05,2),round(range_cmf[1][1]-0.05,2)]
-                    range_cmf[1]=new_range
-                    range_cmf[2]=[0,0]
-                    update_cell_node('CMF', trade_type,range_cmf)
-                    update_cell_weight('bias', trade_type, '0.5')
-            if cmf_w[2][0]<cmf_w[2][1]:
-                new_range=[round(range_cmf[0][0]-0.05,2),round(range_cmf[0][0]-0.05,2)]
-                range_cmf[0]=new_range
-                range_cmf[2]=[0,0]
-                update_cell_node('CMF', trade_type,range_cmf)
-                update_cell_weight('bias', trade_type, '0.5')
-        if rsi_w[0]<trigger or rsi_w[1]<trigger:
-            range_rsi=ast.literal_eval(read_matching_node('RSI', trade_type))
-            if rsi_w[2][0]>rsi_w[2][1]:
-                new_range=[round(range_rsi[1][1]-0.1,2),round(range_rsi[1][1]-0.1,2)]
-                range_rsi[1]=new_range
-                update_cell_node('RSI', trade_type,range_rsi)
-                update_cell_weight('bias', trade_type, '0.5')
-            if rsi_w[2][0]<rsi_w[2][1]:
-                new_range=[round(range_rsi[0][0]-0.1,2),round(range_rsi[0][0]-0.1,2)]
-                range_rsi[0]=new_range
-                update_cell_node('RSI', trade_type,range_rsi)
-                update_cell_weight('bias', trade_type, '0.5')
-        if zscore_w[0]<trigger or zscore_w[1]<trigger:
-            range_zscore=ast.literal_eval(read_matching_node('ZSCORE', trade_type))
-            if zscore_w[2][0]>zscore_w[2][1]:
-                new_range=[round(range_cmf[1][1]-0.05,2),round(range_zscore[1][1]-0.05,2)]
-                range_zscore[1]=new_range
-                update_cell_node('ZSCORE', trade_type,range_zscore)
-                update_cell_weight('bias', trade_type, '0.5')
-            if zscore_w[2][0]<zscore_w[2][1]:
-                new_range=[round(range_zscore[0][0]-0.05,2),round(range_zscore[0][0]-0.05,2)]
-                range_zscore[0]=new_range
-                update_cell_node('ZSCORE', trade_type,range_zscore)
-                update_cell_weight('bias', trade_type, '0.5')
+    pass
     
             
         
-
 def unlearn():
-    trade_types=['GL','GS','TL','TS']
-    for trade_type in trade_types:
-        trend_w=ast.literal_eval(read_matching_weight('TREND', trade_type))
-        cmf_w=ast.literal_eval(read_matching_weight('CMF',trade_type))
-        zscore_w=ast.literal_eval(read_matching_weight('ZSCORE',trade_type))
-        rsi_w=ast.literal_eval(read_matching_weight('RSI', trade_type))
-        trend_w[0]=round(trend_w[0] - 0.1, 2)
-        rsi_w[0]=round(rsi_w[0] - 0.1, 2)
-        rsi_w[2][0]+=1
-        update_cell_weight('RSI', trade_type, rsi_w)
-        update_cell_weight('TREND', trade_type, trend_w)
-        cmf_w[0]=round(cmf_w[0] - 0.1, 2)
-        cmf_w[2][0]+=1
-        update_cell_weight('CMF', trade_type, cmf_w)
-        zscore_w[0]=round(zscore_w[0] - 0.1, 2)
-        zscore_w[2][0]+=1
-        update_cell_weight('ZSCORE', trade_type, zscore_w)
-        trend_w[1]=round(trend_w[1] - 0.1, 2)
-        rsi_w[1]=round(rsi_w[1] - 0.1, 2)
-        rsi_w[2][1]+=1
-        update_cell_weight('RSI', trade_type, rsi_w)
-        update_cell_weight('TREND', trade_type, trend_w)
-        cmf_w[1]=round(cmf_w[1] - 0.1, 2)
-        cmf_w[2][1]+=1
-        update_cell_weight('CMF', trade_type, cmf_w)
-        zscore_w[1]=round(zscore_w[1] - 0.1, 2)
-        zscore_w[2][1]+=1
-        update_cell_weight('ZSCORE', trade_type, zscore_w)
+    pass
     
         
 ######### Real Trading #############
@@ -750,7 +764,7 @@ def simtrade(bList,BotLimit,simuwallet):
             print("added:",Ti,ttype)
             add_tradeLog(Ti,ttype,datetime,opprice,amount)
     #sleep(900)
-    while bList:
+    while True:
         for Ti,ttype in bList.items():
             items_to_remove = []
             candles = client.futures_continous_klines(pair=Ti, interval=globalInterval,ContractType='PERPETUAL')
@@ -781,10 +795,14 @@ def simtrade(bList,BotLimit,simuwallet):
                         update_cell_Tlog(Ti, 'result', 'W')
                 print("trade closed : ", Ti)    
                 items_to_remove.append(Ti)
+                print("break from the loop")
+                break
         for key in items_to_remove:
             del bList[key]
-        sleep(300)
+        if len(bList) == 0:
+            break
         items_to_remove = []
+        sleep(300)
     print("All Trades Done")
     return True
         
@@ -818,6 +836,8 @@ def simulated_trader(excludedlist,CurrencyType,BotLimit,simuwallet):
             if result==True:
                 print("Now Evaluate")
                 Evaluate_Trades()
+                break
+                check_weights()
                 clear_Token_History()
                 clear_tradeLog()
         else:
@@ -837,9 +857,7 @@ simuwallet=100
 lvrg=2
 #main_trader(excludedlist,CurrencyType,numBots,lvrg)
 simulated_trader(excludedlist,CurrencyType,BotLimit,simuwallet)
-#Evaluate_Trades()
 
-#print(filtered_df)
     
 
 
