@@ -639,16 +639,30 @@ def Evaluate_Trades():
                 bestchoice= get_key_of_lower_number(pressurelist)
                 if bestchoice=='GL' or bestchoice=='TL':
                     opening_intensity,closing_intensity=price_intensity(smallest_value, largest_value,first_price, last_price)
+                    sub_weights(trade_type, opening_intensity,closing_intensity)
+                    updatereflections(TCMF_o,TRSI_o,TTREND_o,TCMF_c,TTREND_c,TRSI_c,bestchoice)
                 if bestchoice=='GS' or bestchoice=='TS':
                     opening_intensity,closing_intensity=price_intensity(largest_value, smallest_value,first_price, last_price)
+                    sub_weights(trade_type, opening_intensity,closing_intensity)
+                    updatereflections(TCMF_o,TRSI_o,TTREND_o,TCMF_c,TTREND_c,TRSI_c,bestchoice)
+            else:
+                if trade_type=='GL' or trade_type=='TL':
+                    opening_intensity,closing_intensity=price_intensity(smallest_value, largest_value,first_price, last_price)
+                if trade_type=='GS' or trade_type=='TS':
+                    opening_intensity,closing_intensity=price_intensity(largest_value, smallest_value,first_price, last_price)
                 sub_weights(trade_type, opening_intensity,closing_intensity)
-                updatereflections(TCMF_o,TRSI_o,TTREND_o,TCMF_c,TTREND_c,TRSI_c,bestchoice)
+                TNUM=ast.literal_eval(read_matching_table('reflections','TNUM', trade_type))
+                TNUM=TNUM + 1
+                update_cell_table('reflections','TNUM', ttype, TNUM)  
         else:
             if trade_type=='GL' or trade_type=='TL':
                 opening_intensity,closing_intensity=price_intensity(smallest_value, largest_value,first_price, last_price)
             if trade_type=='GS' or trade_type=='TS':
                 opening_intensity,closing_intensity=price_intensity(largest_value, smallest_value,first_price, last_price)
             add_weights(trade_type,opening_intensity,closing_intensity)
+            TNUM=ast.literal_eval(read_matching_table('reflections','TNUM', trade_type))
+            TNUM=TNUM + 1
+            update_cell_table('reflections','TNUM', ttype, TNUM)  
             
 def running_average(previous_avg, new_number, total_items):
     if total_items == 0:
@@ -767,7 +781,6 @@ def check_weights():
         trend_w=ast.literal_eval(read_matching_table('weights','TREND', trade_type))
         cmf_w=ast.literal_eval(read_matching_table('weights','CMF',trade_type))
         rsi_w=ast.literal_eval(read_matching_table('weights','RSI', trade_type))
-        print(trend_w,cmf_w,rsi_w)
         if rsi_w[0]<trigger:
             range_rsi=ast.literal_eval(read_matching_table('nodes','RSI', trade_type))
             ref_rsi=ast.literal_eval(read_matching_table('reflections','RSI', trade_type))   
@@ -877,8 +890,6 @@ def realtrade(bList,BotLimit,lvrg,tinfo,):
             TRSI=rsi(df)
             cprice = df['close'].iloc[-1]
             add_token_history(Ti, cprice,TCMF,TRSI,TTREND)
-            print("TokenHistoryadded:" ,Ti,cprice,TCMF,TRSI,TTREND)
-            print("CloseLayer:" ,Ti,CloseLayer(TRSI,TCMF,TTREND,ttype))
             if CloseLayer(TRSI,TCMF,TTREND,ttype):
                 oprice=read_matching_TLog(Ti, 'opprice')
                 amount=read_matching_TLog(Ti, 'amount')
@@ -1012,10 +1023,10 @@ def simulated_trader(excludedlist,CurrencyType,BotLimit):
                 clear_Token_History()
                 clear_tradeLog()
         print("sleeping waiting for next cycle")
-        sleep(900)
+        sleep(60)
 
-#clear_tradeLog()
-#clear_Token_History()  
+clear_tradeLog()
+clear_Token_History()  
 BotLimit=5
 print("Booting up... ")
 excludedlist=['BTCUSDT','BTCDOMUSDT']
