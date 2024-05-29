@@ -20,7 +20,7 @@ import operator
 import os
 import sys
 import ast
-globalInterval=Client.KLINE_INTERVAL_3MINUTE
+globalInterval=Client.KLINE_INTERVAL_5MINUTE
 ########close/open trades###########
 def Lsafe(client,Seed,mrgType,lvrg):
     try:
@@ -148,7 +148,7 @@ def FindNewToken(client,exInfo,excludedlist,CurrencyType):
 
 def OpenLayer(TokenInfo):
     ranked_result={}
-    trade_types=['GL','GS','TL','TS']
+    trade_types=['TL','TS']
     for Ti,value in TokenInfo.items():
         pressurelist={}
         try:
@@ -300,8 +300,8 @@ def MACD(dataset, short_period=12, long_period=26, signal_period=9):
     normalized_histogram = (macd_histogram / max_abs_histogram) * 100
     
     # Extract the latest MACD, Signal, and Histogram values
-    latest_macd = round(macd_line.iloc[-1], 2)
-    latest_signal = round(signal_line.iloc[-1], 2)
+    # latest_macd = round(macd_line.iloc[-1], 2)
+    # latest_signal = round(signal_line.iloc[-1], 2)
     latest_histogram = round(normalized_histogram.iloc[-1], 2)
     
     return int(latest_histogram)
@@ -369,10 +369,8 @@ def nodes():
         # Create a DataFrame with the desired structure
         data = {
             'IND': ['RSI', 'CMF','TREND','MACD'],
-            'GL': ['[[30,40],[60,70]]', '[[-0.3,0],[0,0.3]]','[0,1]','[[10,15],[10,0]]'],
-            'GS': ['[[60,70],[30,40]]', '[[0,0.3],[-0.3,0]]','[1,0]','[[-10,-15],[0,-10]]'],
-            'TL': ['[[70,80],[30,20]]', '[[0.3,0.6],[-0.6,-0.3]]','[1,0]','[[10,0],[10,15]]'],
-            'TS': ['[[30,20],[70,80]]', '[[-0.6,-0.3],[0.3,0.6]]','[0,1]','[[0,-10],[-10,-15]]']
+            'TL': ['[[70,80],[30,20]]', '[[0.1,0.5],[-0.5,-0.1]]','[1,0]','[[0,10],[-10,-20]]'],
+            'TS': ['[[30,20],[70,80]]', '[[-0.5,-0.1],[0.1,0.5]]','[0,1]','[[0,-10],[10,20]]']
             }
         df = pd.DataFrame(data)
         df.to_csv('nodes.csv', index=False)
@@ -385,8 +383,6 @@ def reflections():
         # Create a DataFrame with the desired structure
         data = {
             'IND': ['RSI','CMF','TREND','MACD','TNUM'],
-            'GL': ['[6969,6969]','[6969,6969]', '[6969,6969]','[6969,6969]','0'],
-            'GS': ['[6969,6969]','[6969,6969]', '[6969,6969]','[6969,6969]','0'],
             'TL': ['[6969,6969]','[6969,6969]','[6969,6969]','[6969,6969]','0'],
             'TS': ['[6969,6969]','[6969,6969]', '[6969,6969]','[6969,6969]','0']
             }
@@ -401,8 +397,6 @@ def weights():
         # Create a DataFrame with the desired structure '[1,1]', '[1,1]', '[1,1]', '[1,1]',
         data = {
             'IND': ['RSI', 'CMF', 'TREND','MACD'],
-            'GL': ['[1,1]', '[1,1]','[1,1]','[1,1]'],
-            'GS': ['[1,1]', '[1,1]','[1,1]','[1,1]'],
             'TL': ['[1,1]', '[1,1]', '[1,1]','[1,1]'],
             'TS': ['[1,1]', '[1,1]', '[1,1]','[1,1]']
             }
@@ -609,29 +603,49 @@ def bot_limited_Tokens(dictionary, n):
             break
     return new_dict
 
-def angle_to_normalized_value(num1, num2):
-    # Calculate the absolute rise
-    rise = abs(num2 - num1)
+def adjust_ranges(ranges, upper_limit, lower_limit):
+    # Extract initial ranges
+    range1, range2 = ranges
     
-    # Calculate the run (use 1 to represent a unit horizontal distance)
-    run = 1
+    # Calculate the midpoints of the ranges
+    midpoint1 = (range1[0] + range1[1]) / 2
+    midpoint2 = (range2[0] + range2[1]) / 2
     
-    # Calculate the angle in radians
-    angle_radians = math.atan2(rise, run)
+    # Calculate the total distance that needs to be moved
+    distance_to_upper = upper_limit - midpoint1
+    distance_to_lower = lower_limit - midpoint2
     
-    # Convert the angle to degrees
-    angle_degrees = math.degrees(angle_radians)
+    # Use the smaller of the two distances to ensure both ranges move equally without exceeding limits
+    move_distance = min(distance_to_upper, abs(distance_to_lower))
     
-    # Normalize the angle to the range [0, 1], where 90 degrees is 1
-    normalized_value = angle_degrees / 90
+    # Adjust the ranges
+    new_range1 = [midpoint1 + move_distance - (range1[1] - range1[0]) / 2, midpoint1 + move_distance + (range1[1] - range1[0]) / 2]
+    new_range2 = [midpoint2 - move_distance - (range2[1] - range2[0]) / 2, midpoint2 - move_distance + (range2[1] - range2[0]) / 2]
     
-    # Ensure the value is within the range [0, 1]
-    normalized_value = min(max(normalized_value, 0), 1)
+    return [new_range1, new_range2]  
+
+def percentage_change(old_price, new_price):
+    """
+    Calculates and prints the percentage change between old_price and new_price.
+
+    Parameters:
+    old_price (float): The initial price.
+    new_price (float): The new price.
+
+    Returns:
+    float: The percentage change between old_price and new_price.
+    """
+    if old_price == 0:
+        raise ValueError("Old price cannot be zero")
     
-    return round(normalized_value,2)
+    # Calculate the percentage change
+    change = ((new_price - old_price) / old_price) * 100
     
+    return abs(round(change,0))
+
 def Evaluate_Trades():
     TLog=TradeLog()
+    weight=0.1
     for index,item in TLog.iterrows():
         the_token=item['token']
         trade_type=item['type']
@@ -639,157 +653,33 @@ def Evaluate_Trades():
         tokenhistory=filter_multi_trade('token', the_token)
         row_with_smallest_value = tokenhistory['price'].idxmin()
         row_with_largest_value = tokenhistory['price'].idxmax()
+        sprice=tokenhistory.iloc[row_with_smallest_value]['price']
+        lprice=tokenhistory.iloc[row_with_largest_value]['price']
         print(row_with_largest_value, row_with_smallest_value)
+        price_change=percentage_change(sprice, lprice)
+        print('price change in perecentage:',price_change)
+        weight=round(price_change/100,2)
         if trade_result=="L":
-            if row_with_smallest_value<row_with_largest_value:
-                TCMF_o=tokenhistory.iloc[row_with_smallest_value]['CMF']
-                TTREND_o=tokenhistory.iloc[row_with_smallest_value]['TREND']
-                TRSI_o=tokenhistory.iloc[row_with_smallest_value]['RSI']
-                TMACD_o=tokenhistory.iloc[row_with_smallest_value]['MACD']
-                TCMF_oo=tokenhistory.iloc[row_with_smallest_value + 1]['CMF']
-                TTREND_oo=tokenhistory.iloc[row_with_smallest_value + 1]['TREND']
-                TMACD_oo=tokenhistory.iloc[row_with_smallest_value + 1]['MACD']
-                TRSI_oo=tokenhistory.iloc[row_with_smallest_value + 1]['RSI']
-                
-                TCMF_c=tokenhistory.iloc[row_with_largest_value]['CMF']
-                TTREND_c=tokenhistory.iloc[row_with_largest_value]['TREND']
-                TRSI_c=tokenhistory.iloc[row_with_largest_value]['RSI']
-                TMACD_c=tokenhistory.iloc[row_with_largest_value]['MACD']
-                TCMF_cc=tokenhistory.iloc[row_with_largest_value - 1]['CMF']
-                TTREND_cc=tokenhistory.iloc[row_with_largest_value - 1]['TREND']
-                TRSI_cc=tokenhistory.iloc[row_with_largest_value - 1]['RSI']
-                TMACD_cc=tokenhistory.iloc[row_with_largest_value - 1]['MACD']
-                
-                rsi_adj=round(angle_to_normalized_value(TRSI_o, TRSI_oo)/2,2)
-                cmf_adj=round(angle_to_normalized_value(TCMF_o, TCMF_oo)/2,2)
-                trend_adj=round(angle_to_normalized_value(TTREND_o, TTREND_oo)/2,2)
-                macd_adj=round(angle_to_normalized_value(TMACD_o, TMACD_oo)/2,2)
-                sub_open_weight(rsi_adj,cmf_adj,trend_adj,macd_adj,trade_type)
-                print(rsi_adj,cmf_adj,trend_adj,macd_adj,trade_type)
-                rsi_adj=round(angle_to_normalized_value(TRSI_c, TRSI_cc)/2,2)
-                cmf_adj=round(angle_to_normalized_value(TCMF_c, TCMF_cc)/2,2)
-                trend_adj=round(angle_to_normalized_value(TTREND_c, TTREND_cc)/2,2)
-                macd_adj=round(angle_to_normalized_value(TMACD_c, TMACD_cc)/2,2)
-                sub_close_weight(rsi_adj,cmf_adj,trend_adj,macd_adj,trade_type)
-                print(rsi_adj,cmf_adj,trend_adj,macd_adj,trade_type)
-                print(TCMF_o,TRSI_o,TTREND_o,TMACD_o,TCMF_c,TTREND_c,TRSI_c,TMACD_c,'GL')
-                updatereflections(TCMF_o,TRSI_o,TTREND_o,TMACD_o,TCMF_c,TTREND_c,TRSI_c,TMACD_c,'GL')
-                print(TCMF_cc,TRSI_cc,TTREND_cc,TMACD_cc,TCMF_oo,TTREND_oo,TRSI_oo,TMACD_oo,'TS')
-                updatereflections(TCMF_cc,TRSI_cc,TTREND_cc,TMACD_cc,TCMF_oo,TTREND_oo,TRSI_oo,TMACD_oo,'TS')
-            else:
-                TCMF_o=tokenhistory.iloc[row_with_largest_value]['CMF']
-                TTREND_o=tokenhistory.iloc[row_with_largest_value]['TREND']
-                TRSI_o=tokenhistory.iloc[row_with_largest_value]['RSI']
-                TMACD_o=tokenhistory.iloc[row_with_largest_value]['MACD']
-                TCMF_oo=tokenhistory.iloc[row_with_largest_value + 1]['CMF']
-                TTREND_oo=tokenhistory.iloc[row_with_largest_value + 1]['TREND']
-                TRSI_oo=tokenhistory.iloc[row_with_largest_value + 1]['RSI']
-                TMACD_oo=tokenhistory.iloc[row_with_largest_value + 1]['MACD']
-                
-                TCMF_c=tokenhistory.iloc[row_with_smallest_value]['CMF']
-                TTREND_c=tokenhistory.iloc[row_with_smallest_value]['TREND']
-                TRSI_c=tokenhistory.iloc[row_with_smallest_value]['RSI']
-                TMACD_c=tokenhistory.iloc[row_with_smallest_value]['MACD']
-                TCMF_cc=tokenhistory.iloc[row_with_smallest_value - 1]['CMF']
-                TTREND_cc=tokenhistory.iloc[row_with_smallest_value - 1]['TREND']
-                TRSI_cc=tokenhistory.iloc[row_with_smallest_value - 1]['RSI']
-                TMACD_cc=tokenhistory.iloc[row_with_smallest_value - 1]['MACD']
-                
-                rsi_adj=round(angle_to_normalized_value(TRSI_o, TRSI_oo)/2,2)
-                cmf_adj=round(angle_to_normalized_value(TCMF_o, TCMF_oo)/2,2)
-                trend_adj=round(angle_to_normalized_value(TTREND_o, TTREND_oo)/2,2)
-                macd_adj=round(angle_to_normalized_value(TMACD_o, TMACD_oo)/2,2)
-                sub_open_weight(rsi_adj,cmf_adj,trend_adj,macd_adj,trade_type)
-                
-                rsi_adj=round(angle_to_normalized_value(TRSI_c, TRSI_cc)/2,2)
-                cmf_adj=round(angle_to_normalized_value(TCMF_c, TCMF_cc)/2,2)
-                trend_adj=round(angle_to_normalized_value(TTREND_c, TTREND_cc)/2,2)
-                macd_adj=round(angle_to_normalized_value(TMACD_c, TMACD_cc)/2,2)
-                sub_close_weight(rsi_adj,cmf_adj,trend_adj,macd_adj,trade_type)
-                
-                print(TCMF_o,TRSI_o,TTREND_o,TMACD_o,TCMF_c,TTREND_c,TRSI_c,TMACD_c,'GS')
-                updatereflections(TCMF_o,TRSI_o,TTREND_o,TMACD_o,TCMF_c,TTREND_c,TRSI_c,TMACD_c,'GS')
-                print(TCMF_cc,TRSI_cc,TTREND_cc,TMACD_cc,TCMF_oo,TTREND_oo,TRSI_oo,TMACD_oo,'TL')
-                updatereflections(TCMF_cc,TRSI_cc,TTREND_cc,TMACD_cc,TCMF_oo,TTREND_oo,TRSI_oo,TMACD_oo,'TL')
-        else:
-            TCMF_o = tokenhistory.iloc[0]['CMF']
-            TTREND_o = tokenhistory.iloc[0]['TREND']
-            TRSI_o = tokenhistory.iloc[0]['RSI']
-            TMACD_o = tokenhistory.iloc[0]['MACD']
-            TCMF_oo = tokenhistory.iloc[1]['CMF']
-            TTREND_oo = tokenhistory.iloc[1]['TREND']
-            TRSI_oo = tokenhistory.iloc[1]['RSI']
-            TMACD_oo = tokenhistory.iloc[1]['MACD']
+            sub_open_weight(weight,weight,weight,weight,trade_type)
+            sub_close_weight(weight,weight,weight,weight,trade_type)
+        if trade_result=="W":
+            add_open_weight(weight,weight,weight,weight,trade_type)
+            add_close_weight(weight,weight,weight,weight,trade_type)
             
-            TCMF_c = tokenhistory.iloc[-1]['CMF']
-            TTREND_c = tokenhistory.iloc[-1]['TREND']
-            TRSI_c = tokenhistory.iloc[-1]['RSI']
-            TMACD_c = tokenhistory.iloc[-1]['MACD']
-            TCMF_cc = tokenhistory.iloc[-2]['CMF']
-            TTREND_cc = tokenhistory.iloc[-2]['TREND']
-            TRSI_cc = tokenhistory.iloc[-2]['RSI']
-            TMACD_cc = tokenhistory.iloc[-2]['MACD']
-                
-            rsi_adj=round(angle_to_normalized_value(TRSI_o, TRSI_oo)/2,2)
-            cmf_adj=round(angle_to_normalized_value(TCMF_o, TCMF_oo)/2,2)
-            trend_adj=round(angle_to_normalized_value(TTREND_o, TTREND_oo)/2,2)
-            macd_adj=round(angle_to_normalized_value(TMACD_o, TMACD_oo)/2,2)
-            add_open_weight(rsi_adj,cmf_adj,trend_adj,macd_adj,trade_type)
+        TCMF_o=tokenhistory.iloc[row_with_smallest_value]['CMF']
+        TTREND_o=tokenhistory.iloc[row_with_smallest_value]['TREND']
+        TRSI_o=tokenhistory.iloc[row_with_smallest_value]['RSI']
+        TMACD_o=tokenhistory.iloc[row_with_smallest_value]['MACD']
+        
+        TCMF_c=tokenhistory.iloc[row_with_largest_value]['CMF']
+        TTREND_c=tokenhistory.iloc[row_with_largest_value]['TREND']
+        TRSI_c=tokenhistory.iloc[row_with_largest_value]['RSI']
+        TMACD_c=tokenhistory.iloc[row_with_largest_value]['MACD']
+
+        print(TCMF_o,TRSI_o,TTREND_o,TMACD_o,TCMF_c,TTREND_c,TRSI_c,TMACD_c,'TL','TS')
+        updatereflections(TCMF_o,TRSI_o,TTREND_o,TMACD_o,TCMF_c,TTREND_c,TRSI_c,TMACD_c,'TL')
+        updatereflections(TCMF_c,TRSI_c,TTREND_c,TMACD_c,TCMF_o,TTREND_o,TRSI_o,TMACD_o,'TS')
             
-            rsi_adj=round(angle_to_normalized_value(TRSI_c, TRSI_cc)/2,2)
-            cmf_adj=round(angle_to_normalized_value(TCMF_c, TCMF_cc)/2,2)
-            trend_adj=round(angle_to_normalized_value(TTREND_c, TTREND_cc)/2,2)
-            macd_adj=round(angle_to_normalized_value(TMACD_c, TMACD_cc)/2,2)
-            add_close_weight(rsi_adj,cmf_adj,trend_adj,macd_adj,trade_type)
-            
-            updatereflections(TCMF_o,TRSI_o,TTREND_o,TMACD_o,TCMF_c,TTREND_c,TRSI_c,TMACD_c,trade_type)
-            
-            if row_with_smallest_value<row_with_largest_value:
-                TCMF_o=tokenhistory.iloc[row_with_smallest_value]['CMF']
-                TTREND_o=tokenhistory.iloc[row_with_smallest_value]['TREND']
-                TRSI_o=tokenhistory.iloc[row_with_smallest_value]['RSI']
-                TMACD_o=tokenhistory.iloc[row_with_smallest_value]['MACD']
-                TCMF_oo=tokenhistory.iloc[row_with_smallest_value + 1]['CMF']
-                TTREND_oo=tokenhistory.iloc[row_with_smallest_value + 1]['TREND']
-                TMACD_oo=tokenhistory.iloc[row_with_smallest_value + 1]['MACD']
-                TRSI_oo=tokenhistory.iloc[row_with_smallest_value + 1]['RSI']
-                
-                TCMF_c=tokenhistory.iloc[row_with_largest_value]['CMF']
-                TTREND_c=tokenhistory.iloc[row_with_largest_value]['TREND']
-                TRSI_c=tokenhistory.iloc[row_with_largest_value]['RSI']
-                TMACD_c=tokenhistory.iloc[row_with_largest_value]['MACD']
-                TCMF_cc=tokenhistory.iloc[row_with_largest_value - 1]['CMF']
-                TTREND_cc=tokenhistory.iloc[row_with_largest_value - 1]['TREND']
-                TRSI_cc=tokenhistory.iloc[row_with_largest_value - 1]['RSI']
-                TMACD_cc=tokenhistory.iloc[row_with_largest_value - 1]['MACD']
-                
-                print(TCMF_o,TRSI_o,TTREND_o,TMACD_o,TCMF_c,TTREND_c,TRSI_c,TMACD_c,'GL')
-                updatereflections(TCMF_o,TRSI_o,TTREND_o,TMACD_o,TCMF_c,TTREND_c,TRSI_c,TMACD_c,'GL')
-                print(TCMF_cc,TRSI_cc,TTREND_cc,TMACD_cc,TCMF_oo,TTREND_oo,TRSI_oo,TMACD_oo,'TS')
-                updatereflections(TCMF_cc,TRSI_cc,TTREND_cc,TMACD_cc,TCMF_oo,TTREND_oo,TRSI_oo,TMACD_oo,'TS')
-            else:
-                TCMF_o=tokenhistory.iloc[row_with_largest_value]['CMF']
-                TTREND_o=tokenhistory.iloc[row_with_largest_value]['TREND']
-                TRSI_o=tokenhistory.iloc[row_with_largest_value]['RSI']
-                TMACD_o=tokenhistory.iloc[row_with_largest_value]['MACD']
-                TCMF_oo=tokenhistory.iloc[row_with_largest_value + 1]['CMF']
-                TTREND_oo=tokenhistory.iloc[row_with_largest_value + 1]['TREND']
-                TRSI_oo=tokenhistory.iloc[row_with_largest_value + 1]['RSI']
-                TMACD_oo=tokenhistory.iloc[row_with_largest_value + 1]['MACD']
-                
-                TCMF_c=tokenhistory.iloc[row_with_smallest_value]['CMF']
-                TTREND_c=tokenhistory.iloc[row_with_smallest_value]['TREND']
-                TRSI_c=tokenhistory.iloc[row_with_smallest_value]['RSI']
-                TMACD_c=tokenhistory.iloc[row_with_smallest_value]['MACD']
-                TCMF_cc=tokenhistory.iloc[row_with_smallest_value - 1]['CMF']
-                TTREND_cc=tokenhistory.iloc[row_with_smallest_value - 1]['TREND']
-                TRSI_cc=tokenhistory.iloc[row_with_smallest_value - 1]['RSI']
-                TMACD_cc=tokenhistory.iloc[row_with_smallest_value - 1]['MACD']
-                
-                print(TCMF_o,TRSI_o,TTREND_o,TMACD_o,TCMF_c,TTREND_c,TRSI_c,TMACD_c,'GL')
-                updatereflections(TCMF_o,TRSI_o,TTREND_o,TMACD_o,TCMF_c,TTREND_c,TRSI_c,TMACD_c,'GL')
-                print(TCMF_cc,TRSI_cc,TTREND_cc,TMACD_cc,TCMF_oo,TTREND_oo,TRSI_oo,TMACD_oo,'TS')
-                updatereflections(TCMF_cc,TRSI_cc,TTREND_cc,TMACD_cc,TCMF_oo,TTREND_oo,TRSI_oo,TMACD_oo,'TS')
                 
 def add_open_weight(rsi_adj,cmf_adj,trend_adj,macd_adj,trade_type):
     trend_w=ast.literal_eval(read_matching_table('weights','TREND', trade_type))
@@ -848,7 +738,7 @@ def sub_close_weight(rsi_adj,cmf_adj,trend_adj,macd_adj,trade_type):
     update_cell_table('weights','MACD', trade_type, macd_w)
 
 def rebalance():
-    t_types=['GL','GS','TL','TS']
+    t_types=['TL','TS']
     for trade_type in t_types:
         trend_w=ast.literal_eval(read_matching_table('weights','TREND', trade_type))
         cmf_w=ast.literal_eval(read_matching_table('weights','CMF',trade_type))
@@ -889,8 +779,6 @@ def updatereflections(TCMF_o,TRSI_o,TTREND_o,TMACD_o,TCMF_c,TTREND_c,TRSI_c,TMAC
     range_cmf=ast.literal_eval(read_matching_table('reflections','CMF', ttype))
     trend=ast.literal_eval(read_matching_table('reflections','TREND', ttype)) 
     range_macd=ast.literal_eval(read_matching_table('reflections','MACD', ttype))
-    TNUM=ast.literal_eval(read_matching_table('reflections','TNUM', ttype))
-    print('shitty shit')
     if range_rsi[0]==base:
         range_rsi=[0,range_rsi[1]]
     if range_rsi[1]==base:
@@ -906,18 +794,20 @@ def updatereflections(TCMF_o,TRSI_o,TTREND_o,TMACD_o,TCMF_c,TTREND_c,TRSI_c,TMAC
     if trend[0]==base:
         trend=[0,trend[1]]
     if trend[1]==base:
-        trend=[trend[0],0]   
+        trend=[trend[0],0]
+    TNUM=ast.literal_eval(read_matching_table('reflections','TNUM', ttype))
+    TNUM=TNUM + 1
+    update_cell_table('reflections','TNUM', ttype, TNUM)
+    TNUM=ast.literal_eval(read_matching_table('reflections','TNUM', ttype))
     range_rsi=str([running_average(range_rsi[0], TRSI_o, TNUM),running_average(range_rsi[1], TRSI_c, TNUM)])
     range_cmf=str([running_average(range_cmf[0], TCMF_o, TNUM),running_average(range_cmf[1], TCMF_c, TNUM)])
     range_macd=str([running_average(range_macd[0], TMACD_o, TNUM),running_average(range_macd[1], TMACD_c, TNUM)])
-    trend=str([running_average(trend[0], TTREND_o, TNUM),running_average(trend[1], TTREND_c, TNUM)])
-    
+    trend=str([running_average(trend[0], TTREND_o, TNUM),running_average(trend[1], TTREND_c, TNUM)]) 
     update_cell_table('reflections','RSI', ttype, range_rsi)
     update_cell_table('reflections','CMF', ttype, range_cmf)
     update_cell_table('reflections','TREND', ttype, trend)
     update_cell_table('reflections','MACD', ttype, range_macd)
-    TNUM=TNUM + 1
-    update_cell_table('reflections','TNUM', ttype, TNUM)
+
     
 def trigger_amount(trade_type,side):
     if side=='open':
@@ -932,91 +822,123 @@ def trigger_amount(trade_type,side):
         rsi_w=ast.literal_eval(read_matching_table('weights','RSI', trade_type))
         macd_w=ast.literal_eval(read_matching_table('weights','MACD', trade_type))
         return round(((trend_w[1]+cmf_w[1]+rsi_w[1]+macd_w[1])/4),2)
+    
+def move_range_towards_target(range_list: list, target: float, percentage: float) -> list:
+    """
+    Move the range [start, end] towards the target by the given percentage.
+
+    Args:
+    range_list (list): A list containing the start and end of the range.
+    target (float): The target number, which can be inside or outside the range.
+    percentage (float): The percentage by which to move the range towards the target.
+
+    Returns:
+    list: The new range as a list after moving towards the target.
+    """
+    if len(range_list) != 2:
+        raise ValueError("range_list must contain exactly two elements: [start, end]")
+
+    start, end = range_list
+
+    # Calculate the amount to move the start and end towards the target
+    move_start = (target - start) * (percentage / 100.0)
+    move_end = (target - end) * (percentage / 100.0)
+
+    # Update the start and end of the range
+    new_start = start + move_start
+    new_end = end + move_end
+
+    return [round(new_start,2), round(new_end,2)]
 
 def adjust_and_reflect():
     empty=6969
-    t_types=["GL","TL","GS","TS"]
+    reset=0.5
+    t_types=["TL","TS"]
     for trade_type in t_types:     
         range_rsi=ast.literal_eval(read_matching_table('nodes','RSI', trade_type))
-        ref_rsi=ast.literal_eval(read_matching_table('reflections','RSI', trade_type))   
+        ref_rsi=ast.literal_eval(read_matching_table('reflections','RSI', trade_type))
+        rsi_w=ast.literal_eval(read_matching_table('weights','RSI', trade_type))
         if ref_rsi[0]!=empty:
-            new_range=str([adjust_range(range_rsi[0], ref_rsi[0]),range_rsi[1]])
+            newValue=move_range_towards_target(range_rsi[0],ref_rsi[0],round(((1-rsi_w[0])*100),0))
+            new_range=str([newValue,range_rsi[1]])
             update_cell_table('nodes','RSI', trade_type, new_range)
+            if rsi_w[0]<reset:
+                update_cell_table('weights','RSI', trade_type,str([1,rsi_w[1]]))
             
         range_rsi=ast.literal_eval(read_matching_table('nodes','RSI', trade_type))
         ref_rsi=ast.literal_eval(read_matching_table('reflections','RSI', trade_type))
+        rsi_w=ast.literal_eval(read_matching_table('weights','RSI', trade_type))
         if ref_rsi[1]!=empty:
-            new_range=str([range_rsi[0],adjust_range(range_rsi[1],ref_rsi[1])])
+            newValue=move_range_towards_target(range_rsi[1],ref_rsi[1],round(((1-rsi_w[1])*100),0))
+            new_range=str([range_rsi[0],newValue])
             update_cell_table('nodes','RSI', trade_type, new_range)
+            if rsi_w[1]<reset:
+                update_cell_table('weights','RSI', trade_type,str([rsi_w[0],1]))
             
         range_macd=ast.literal_eval(read_matching_table('nodes','MACD', trade_type))
-        ref_macd=ast.literal_eval(read_matching_table('reflections','MACD', trade_type))     
+        ref_macd=ast.literal_eval(read_matching_table('reflections','MACD', trade_type))  
+        macd_w=ast.literal_eval(read_matching_table('weights','MACD', trade_type))
         if ref_macd[0]!=empty:
-            new_range=str([adjust_range(range_macd[0], ref_macd[0]),range_macd[1]])
+            newValue=move_range_towards_target(range_macd[0],ref_macd[0],round(((1-macd_w[0])*100),0))
+            new_range=str([newValue,range_macd[1]])
             update_cell_table('nodes','MACD', trade_type, new_range)
-            
+            if macd_w[0]<reset:
+                update_cell_table('weights','MACD', trade_type,str([1,macd_w[1]]))
+                
         range_macd=ast.literal_eval(read_matching_table('nodes','MACD', trade_type))
-        ref_macd=ast.literal_eval(read_matching_table('reflections','MACD', trade_type))   
+        ref_macd=ast.literal_eval(read_matching_table('reflections','MACD', trade_type))  
+        macd_w=ast.literal_eval(read_matching_table('weights','MACD', trade_type))
         if ref_macd[1]!=empty:
-            new_range=str([range_macd[0],adjust_range(range_macd[1],ref_macd[1])])
-            update_cell_table('nodes','MACD', trade_type, new_range)      
+            newValue=move_range_towards_target(range_macd[1],ref_macd[1],round(((1-macd_w[1])*100),0))
+            new_range=str([range_macd[0],newValue])
+            update_cell_table('nodes','MACD', trade_type, new_range)     
+            if macd_w[1]<reset:
+                update_cell_table('weights','MACD', trade_type,str([macd_w[0],1]))
             
         range_cmf=ast.literal_eval(read_matching_table('nodes','CMF', trade_type))
         ref_cmf=ast.literal_eval(read_matching_table('reflections','CMF', trade_type))
+        cmf_w=ast.literal_eval(read_matching_table('weights','CMF', trade_type))
         if ref_cmf[0]!=empty:
-            new_range=str([adjust_range(range_cmf[0], ref_cmf[0]),range_cmf[1]])
+            newValue=move_range_towards_target(range_cmf[0],ref_cmf[0],round(((1-cmf_w[0])*100),0))
+            new_range=str([newValue,range_cmf[1]])
             update_cell_table('nodes','CMF', trade_type, new_range)
+            if cmf_w[0]<reset:
+                update_cell_table('weights','CMF', trade_type,str([1,cmf_w[1]]))
                 
         range_cmf=ast.literal_eval(read_matching_table('nodes','CMF', trade_type))
         ref_cmf=ast.literal_eval(read_matching_table('reflections','CMF', trade_type))
+        cmf_w=ast.literal_eval(read_matching_table('weights','CMF', trade_type))
         if ref_cmf[1]!=empty:
-            new_range=str([range_cmf[0],adjust_range(range_cmf[1], ref_cmf[1])])
+            newValue=move_range_towards_target(range_cmf[1],ref_cmf[1],round(((1-cmf_w[1])*100),0))
+            new_range=str([range_cmf[0],newValue])
             update_cell_table('nodes','CMF', trade_type, new_range)
-            
+            if cmf_w[1]<reset:
+                update_cell_table('weights','CMF', trade_type,str([cmf_w[0],1]))
+                
         trend=ast.literal_eval(read_matching_table('nodes','TREND', trade_type))
         ref_trend=ast.literal_eval(read_matching_table('reflections','TREND', trade_type))
+        trend_w=ast.literal_eval(read_matching_table('weights','TREND', trade_type))
         if ref_trend[0]!=empty:
-            if ref_trend[0]>0.5:
+            if ref_trend[0]>reset:
                 new_range=str([1,trend[1]])
             else:
                 new_range=str([0,trend[1]])
             update_cell_table('nodes','TREND', trade_type, new_range)
-            
+            if trend_w[0]<reset:
+                update_cell_table('weights','TREND', trade_type,str([1,trend_w[1]]))
+                
         trend=ast.literal_eval(read_matching_table('nodes','TREND', trade_type))
         ref_trend=ast.literal_eval(read_matching_table('reflections','TREND', trade_type))
+        trend_w=ast.literal_eval(read_matching_table('weights','TREND', trade_type))
         if ref_trend[1]!=empty:
-            if ref_trend[1]>0.5:
+            if ref_trend[1]>reset:
                 new_range=str([trend[0],1])
             else:
                 new_range=str([trend[0],0])
             update_cell_table('nodes','TREND', trade_type, new_range)
-            
-              
-def adjust_range(original_range, number):
-    # Unpack the original range
-    start, end = original_range
-    
-    # If number is 0, return the original range
-    if number == 0:
-        return original_range
-    
-    # Calculate the difference between end and start
-    diff = end - start
-    
-    # If number is less than start, adjust the range
-    if number < start:
-        new_start = round(number,2)
-        new_end = round((number + diff),2)
-    # If number is greater than end, adjust the range
-    elif number > end:
-        new_start = round((number - diff),2)
-        new_end = round(number,2)
-    # If number is within the original range, return the original range
-    else:
-        return original_range
-    
-    # Return the adjusted range as a list
-    return [new_start, new_end]
+            if trend_w[1]<reset:
+                update_cell_table('weights','TREND', trade_type,str([trend_w[0],1]))
+
  
 def all_w_or_l(column_name, df):
     # Check if the column exists in the DataFrame
@@ -1028,7 +950,6 @@ def all_w_or_l(column_name, df):
         return True
     else:
         return False
-    closeLong(client,amount,Ti)
     
 ######### Real Trading #############
 def realtrade(bList,BotLimit,lvrg,tinfo):
@@ -1042,13 +963,13 @@ def realtrade(bList,BotLimit,lvrg,tinfo):
         df['timestart'] = df['timestart'] / 1000
         df['timeend'] = df['timeend'] / 1000
         df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']] = df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']].astype(float)
-        if ttype=="GL" or ttype=="TL":
+        if ttype=="TL":
             opprice = df['close'].iloc[-1]
             datetime=get_current_datetime_as_string()
             print("added:",Ti,ttype)
             p=LongOrder(client,Ti,tinfo[Ti],BotLimit,lvrg)
             add_tradeLog(Ti,ttype,datetime,opprice,'A',p)
-        if ttype=="GS" or ttype=="TS":
+        if  ttype=="TS":
             opprice = df['close'].iloc[-1]
             datetime=get_current_datetime_as_string()
             print("added:",Ti,ttype)
@@ -1075,53 +996,20 @@ def realtrade(bList,BotLimit,lvrg,tinfo):
             amount=read_matching_TLog(Ti, 'amount')
             cprice = df['close'].iloc[-1]
             oprice=read_matching_TLog(Ti, 'opprice')
-            add_token_history(Ti, cprice,TCMF,TRSI,TTREND,TMACD)
-            #i learned something new about if statements
+            add_token_history(Ti,cprice,TCMF,TRSI,TTREND,TMACD)
             if svresult!='W' and svresult!='L':
-                if ttype=='GL':
-                    open_intensity=is_between_open(TRSI,TCMF,TTREND,TMACD,'TL')
-                    close_intensity=is_between_close(TRSI,TCMF,TTREND,TMACD,ttype)
-                    if open_intensity>trigger_amount('TL','open'):
-                        update_cell_Tlog(Ti, 'type', 'TL')
-                    if close_intensity>trigger_amount(ttype,'close'):
-                        closeLong(client,amount,Ti)
-                        if oprice<cprice:
-                            update_cell_Tlog(Ti, 'result', 'W')
-                        else:
-                            update_cell_Tlog(Ti, 'result', 'L')
-                        print("trade closed : ", Ti)
-                        break
                 if ttype=='TL':
-                    open_intensity=is_between_open(TRSI,TCMF,TTREND,TMACD,'GL')
                     close_intensity=is_between_close(TRSI,TCMF,TTREND,TMACD,ttype)
-                    if open_intensity>trigger_amount('GL','open'):
-                        update_cell_Tlog(Ti, 'type', 'GL')
                     if close_intensity>trigger_amount(ttype,'close'):
                         closeLong(client,amount,Ti)
                         if oprice<cprice:
-                            update_cell_Tlog(Ti, 'result', 'W')
-                        else:
-                            update_cell_Tlog(Ti, 'result', 'L')
-                        print("trade closed : ", Ti)
-                        break
-                if ttype=='GS':
-                    open_intensity=is_between_open(TRSI,TCMF,TTREND,TMACD,'TS')
-                    close_intensity=is_between_close(TRSI,TCMF,TTREND,TMACD,ttype)
-                    if open_intensity>trigger_amount('TS','open'):
-                        update_cell_Tlog(Ti, 'type', 'TS')
-                    if close_intensity>trigger_amount(ttype,'close'):
-                        closeShort(client,amount,Ti)
-                        if oprice>cprice:
                             update_cell_Tlog(Ti, 'result', 'W')
                         else:
                             update_cell_Tlog(Ti, 'result', 'L')
                         print("trade closed : ", Ti)
                         break
                 if ttype=='TS':
-                    open_intensity=is_between_open(TRSI,TCMF,TTREND,TMACD,'GS')
                     close_intensity=is_between_close(TRSI,TCMF,TTREND,TMACD,ttype)
-                    if open_intensity>trigger_amount('GS','open'):
-                        update_cell_Tlog(Ti, 'type', 'GS')
                     if close_intensity>trigger_amount(ttype,'close'):
                         closeShort(client,amount,Ti)
                         if oprice>cprice:
@@ -1134,7 +1022,7 @@ def realtrade(bList,BotLimit,lvrg,tinfo):
         if all_w_or_l('result', TLog):
             print("All Trades Done")
             return True
-        sleep(180)
+        sleep(300)
     print("All Trades Done")
     return True
 
@@ -1148,13 +1036,13 @@ def simtrade(bList,BotLimit,tinfo):
         df['timestart'] = df['timestart'] / 1000
         df['timeend'] = df['timeend'] / 1000
         df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']] = df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']].astype(float)
-        if ttype=="GL" or ttype=="TL":
+        if ttype=="TL":
             opprice = df['close'].iloc[-1]
             datetime=get_current_datetime_as_string()
             #add real Trade command here
             print("added:",Ti,ttype)
             add_tradeLog(Ti,ttype,datetime,opprice,'A','0')
-        if ttype=="GS" or ttype=="TS":
+        if ttype=="TS":
             opprice = df['close'].iloc[-1]
             datetime=get_current_datetime_as_string()
             #add real Trade command here
@@ -1182,55 +1070,19 @@ def simtrade(bList,BotLimit,tinfo):
             print(Ti, cprice,TCMF,TRSI,TTREND,TMACD)
             #i learned something new about if statements
             if svresult!='W' and svresult!='L':
-                if ttype=='GL':
-                    open_intensity=is_between_open(TRSI,TCMF,TTREND,TMACD,'TL')
-                    close_intensity=is_between_close(TRSI,TCMF,TTREND,TMACD,ttype)
-                    print(Ti,close_intensity,trigger_amount(ttype,'close'),trigger_amount('TL','open'),open_intensity)
-                    if open_intensity>trigger_amount('TL','open'):
-                        print(Ti,'switched to TL')
-                        update_cell_Tlog(Ti, 'type', 'TL')
-                    if close_intensity>trigger_amount(ttype,'close'):
-                        if oprice<cprice:
-                            update_cell_Tlog(Ti, 'result', 'W')
-                        else:
-                            update_cell_Tlog(Ti, 'result', 'L')
-                        print("trade closed : ", Ti)
-                        break
                 if ttype=='TL':
-                    open_intensity=is_between_open(TRSI,TCMF,TTREND,TMACD,'GL')
                     close_intensity=is_between_close(TRSI,TCMF,TTREND,TMACD,ttype)
-                    print(Ti,close_intensity,trigger_amount(ttype,'close'),trigger_amount('GL','open'),open_intensity)
-                    if open_intensity>trigger_amount('GL','open'):
-                        print(Ti,'switched to GL')
-                        update_cell_Tlog(Ti, 'type', 'GL')
+                    print(Ti,close_intensity,trigger_amount(ttype,'close'))
                     if close_intensity>trigger_amount(ttype,'close'):
                         if oprice<cprice:
-                            update_cell_Tlog(Ti, 'result', 'W')
-                        else:
-                            update_cell_Tlog(Ti, 'result', 'L')
-                        print("trade closed : ", Ti)
-                        break
-                if ttype=='GS':
-                    open_intensity=is_between_open(TRSI,TCMF,TTREND,TMACD,'TS')
-                    close_intensity=is_between_close(TRSI,TCMF,TTREND,TMACD,ttype)
-                    print(Ti,close_intensity,trigger_amount(ttype,'close'),trigger_amount('TS','open'),open_intensity)
-                    if open_intensity>trigger_amount('TS','open'):
-                        print(Ti,'switched to TS')
-                        update_cell_Tlog(Ti, 'type', 'TS')
-                    if close_intensity>trigger_amount(ttype,'close'): 
-                        if oprice>cprice:
                             update_cell_Tlog(Ti, 'result', 'W')
                         else:
                             update_cell_Tlog(Ti, 'result', 'L')
                         print("trade closed : ", Ti)
                         break
                 if ttype=='TS':
-                    open_intensity=is_between_open(TRSI,TCMF,TTREND,TMACD,'GS')
                     close_intensity=is_between_close(TRSI,TCMF,TTREND,TMACD,ttype)
-                    print(Ti,close_intensity,trigger_amount(ttype,'close'),trigger_amount('GS','open'),open_intensity)
-                    if open_intensity>trigger_amount('GS','open'):
-                        print(Ti,'switched to GS')
-                        update_cell_Tlog(Ti, 'type', 'GS')
+                    print(Ti,close_intensity,trigger_amount(ttype,'close'))
                     if close_intensity>trigger_amount(ttype,'close'):
                         if oprice>cprice:
                             update_cell_Tlog(Ti, 'result', 'W')
@@ -1286,8 +1138,6 @@ def simulated_trader(excludedlist,CurrencyType,BotLimit):
                 Evaluate_Trades()
                 adjust_and_reflect()
                 rebalance()
-                clear_Token_History()
-                clear_tradeLog()
         print("sleeping waiting for next cycle")
         sleep(60)
 
@@ -1299,8 +1149,11 @@ excludedlist=['BTCUSDT','BTCDOMUSDT']
 CurrencyType="USDT"
 lvrg=2
 initial_amt=1000
-#main_trader(excludedlist,CurrencyType,BotLimit,lvrg,initial_amt)
-simulated_trader(excludedlist,CurrencyType,BotLimit)
+main_trader(excludedlist,CurrencyType,BotLimit,lvrg,initial_amt)
+#simulated_trader(excludedlist,CurrencyType,BotLimit)
 #Evaluate_Trades()
 #adjust_and_reflect()
 #rebalance()
+#the length of token history should determine the weight 
+#its learning flipped
+#somthing that takes percentage and a range as input and moves that range towards a given number by that  percent
