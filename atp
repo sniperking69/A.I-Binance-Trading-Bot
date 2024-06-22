@@ -151,27 +151,144 @@ def FindNewToken(client,exInfo,excludedlist,CurrencyType):
         x+=1
     print('100%')            
     return tokenInfo,symInfo
+# ison= (alpha+theta)/3  
+# omega= alpha + theta + phi + beta
+# ro= (alpha +delta + theta)/3
+def rsi_angle(dataset,ttype,window_size):
+    period=14
+    # Calculate daily returns
+    delta = dataset['close'].diff()
+    
+    # Separate positive and negative gains/losses
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    
+    # Calculate average gain and loss
+    avg_gain = gain.rolling(window=period, min_periods=1).mean()
+    avg_loss = loss.rolling(window=period, min_periods=1).mean()
+    
+    # Calculate the Relative Strength (RS)
+    rs = avg_gain / avg_loss
+    
+    # Calculate the RSI
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Extract the last RSI value and round it to 2 decimal places
+    window_size = 10
+    normalized_angle = calculate_normalized_angle(rsi, window_size)
+    if ttype=='FS' and normalized_angle>0:
+        normalized_angle=0
+    if ttype=='FL' and normalized_angle<0:
+        normalized_angle=0
+    return round(normalized_angle,2)
+    
+
+def cmf_angle(data,ttype,window_size):
+    period = 20
+    mf = ((data['close'] - data['low']) - (data['high'] - data['close'])) / (data['high'] - data['low'])
+    mfv = mf * data['volume']
+    cmf_values = mfv.rolling(period).sum() / data['volume'].rolling(period).sum()
+    cmf_values = cmf_values.dropna()
+    window_size = 10
+    normalized_angle = calculate_normalized_angle(cmf_values, window_size)
+    if ttype=='FS' and normalized_angle>0:
+        normalized_angle=0
+    if ttype=='FL' and normalized_angle<0:
+        normalized_angle=0
+    return round(normalized_angle,2)
+    
+def macd_angle(dataset,ttype,window_size):
+    short_period=12
+    long_period=26
+    signal_period=9
+    # Calculate the short-term EMA (12-day EMA)
+    short_ema = calculate_ema(dataset['close'], short_period)
+    
+    # Calculate the long-term EMA (26-day EMA)
+    long_ema = calculate_ema(dataset['close'], long_period)
+    
+    # Calculate the MACD line
+    macd_line = short_ema - long_ema
+    
+    # Calculate the Signal line (9-day EMA of the MACD line)
+    signal_line = calculate_ema(macd_line, signal_period)
+    
+    # Calculate the MACD Histogram
+    macd_histogram = macd_line - signal_line
+    
+    # Normalize the MACD Histogram to a range from -100 to 100
+    max_abs_histogram = macd_histogram.abs().max()
+    normalized_histogram = (macd_histogram / max_abs_histogram) * 100
+    
+    # Extract the latest MACD, Signal, and Histogram values
+    # latest_macd = round(macd_line.iloc[-1], 2)
+    # latest_signal = round(signal_line.iloc[-1], 2)
+    #latest_histogram = round(normalized_histogram.iloc[-1], 2)
+    normalized_angle = calculate_normalized_angle(normalized_histogram, window_size)
+    if ttype=='FS' and normalized_angle>0:
+        normalized_angle=0
+    if ttype=='FL' and normalized_angle<0:
+        normalized_angle=0
+    return round(normalized_angle,2)
+
+def adx_angle(df,window_size):
+    # Calculate ADX
+    adx = ta.adx(high=df['high'], low=df['low'], close=df['close'])
+    
+    # Return the latest ADX value
+    latest_adx = adx['ADX_14']
+    normalized_angle = calculate_normalized_angle(latest_adx, window_size)
+    return round(normalized_angle,2)
+
+def calculate_normalized_angle(series, window_size):
+    if window_size > len(series):
+        raise ValueError("Window size is larger than the number of rows in the Series")
+    
+    # Extract the last window_size values from the Series
+    y = series.tail(window_size).values
+    x = np.arange(window_size)  # x-coordinates are 0, 1, 2, ..., window_size-1
+
+    # Perform linear regression using the pseudo-inverse for stability
+    A = np.vstack([x, np.ones(len(x))]).T
+    m = np.linalg.pinv(A).dot(y)[0]
+
+    # Convert the slope to an angle in degrees
+    angle = math.degrees(math.atan(m))
+    
+    # Normalize the angle to the range [-1, 1]
+    normalized_angle = angle / 90
+    
+    return normalized_angle
 
 def OpenLayer(TokenInfo):
     ranked_result={}
     trade_types=['FL','FS']
+    window_size=9
     for Ti,value in TokenInfo.items():
         pressurelist={}
         try:
-            TZSCORE=zscore(value)
             TCMF=CMF(value)
             TRSI=rsi(value)
             TMACD=MACD(value)
             ADX=calculate_adx(value)
+            ADX_angle=adx_angle(value,window_size)
             for ttype in trade_types:
-                TW=ast.literal_eval(read_matching_table('nodes','TW', ttype))
-                range_intensity=is_between_open(TRSI,TCMF,TMACD,ttype) 
-                if range_intensity>trigger_amount(ttype):
-                    intensity=round(((range_intensity*TW)+abs(TZSCORE)+ADX),2)
-                    pressurelist[ttype]=intensity
+                alpha=cal_alpha_open(TRSI,TCMF,TMACD,ttype)
+                ARSI=rsi_angle(value,ttype,window_size)
+                AMACD=macd_angle(value,ttype,window_size)
+                ACMF=cmf_angle(value,ttype,window_size)
+                phi=ast.literal_eval(read_matching_table('nodes','TW', ttype))
+                Beta=(ADX+ADX_angle)
+                theta=(ARSI+ACMF+AMACD)/3
+                ison=((alpha+theta)/2)
+                omega=(ison*(Beta)+phi)
+                # if ison>0.5:
+                intensity=round(omega,2)
+                pressurelist[ttype]=intensity
         except Exception as e:
             #TokenInfo error Removed from Market or not added yet
             print("TokenInfo error Removed from Market or not added yet",e)
+            continue
         bestchoice=get_key_of_higher_number(pressurelist)
         if bestchoice != None:
             ranked_result[Ti]=[pressurelist[bestchoice],bestchoice]
@@ -183,11 +300,6 @@ def OpenLayer(TokenInfo):
     for key,item in sorted_ranked_result.items():
         Tresult[key]=item[1]
     return Tresult
-
-def trigger_amount(ttype):
-    TW=ast.literal_eval(read_matching_table('nodes','TW', ttype))
-    Tamount=1/3
-    return round(Tamount,2)
 
 def get_key_of_higher_number(dictionary):
     # Initialize variables to keep track of the highest number and its corresponding key
@@ -204,7 +316,7 @@ def get_key_of_higher_number(dictionary):
     return highest_key
 
 #problem rippling solution
-def is_between_open(TRSI,TCMF,TMACD,ttype):
+def cal_alpha_open(TRSI,TCMF,TMACD,ttype):
     range_rsi=ast.literal_eval(read_matching_table('nodes','RSI', ttype))[0]
     range_cmf=ast.literal_eval(read_matching_table('nodes','CMF', ttype))[0]
     range_macd=ast.literal_eval(read_matching_table('nodes','MACD', ttype))[0]
@@ -214,7 +326,7 @@ def is_between_open(TRSI,TCMF,TMACD,ttype):
     average = round(((RSI_intensity) + (CMF_intensity) + (MACD_intensity))/3,2)
     return average
 
-def is_between_close(TRSI,TCMF,TMACD,ttype):
+def cal_alpha_close(TRSI,TCMF,TMACD,ttype):
     range_rsi=ast.literal_eval(read_matching_table('nodes','RSI', ttype))[1]
     range_cmf=ast.literal_eval(read_matching_table('nodes','CMF', ttype))[1]
     range_macd=ast.literal_eval(read_matching_table('nodes','MACD', ttype))[1]
@@ -230,10 +342,10 @@ def is_between_close(TRSI,TCMF,TMACD,ttype):
 def calculate_adx(df):    
     # Calculate ADX
     adx = ta.adx(high=df['high'], low=df['low'], close=df['close'])
-    
     # Return the latest ADX value
     latest_adx = adx['ADX_14'].iloc[-1]
-    return latest_adx
+    normalized_value = latest_adx / 100
+    return round(normalized_value,2)
 
 def CMF(data):
     period = 20
@@ -265,15 +377,6 @@ def rsi(dataset, period=14):
     rsi_value = round(rsi.iloc[-1], 2)
     
     return rsi_value
-
-def zscore(dataset):
-    # Calculate the mean of the dataset
-    #mean = dataset['close'].mean()
-    
-    # Calculate the standard deviation of the dataset
-    std_dev = dataset['close'].std()
-    std_dev = round(np.clip(std_dev, 0, 3),2)
-    return std_dev
 
 def calculate_ema(series, span):
     return series.ewm(span=span, adjust=False).mean()
@@ -569,7 +672,7 @@ def Evaluate_Trades():
         if trade_result=="L":
             sub_weight(weight,trade_type)
         if trade_result=="W":
-            add_weight(weight,trade_type)
+            add_weight(weight,trade_type) adjsut closing side when win
                  
         TCMF_o=tokenhistory.iloc[row_with_smallest_value]['CMF']
         TRSI_o=tokenhistory.iloc[row_with_smallest_value]['RSI']
@@ -699,20 +802,20 @@ def adjust_and_reflect():
             close_macd=ref_macd[1]
 
         if open_rsi!=empty and close_rsi!=empty:
-            on_rsi=adjust_range(node_rsi[0],open_rsi,percent,[10,90])
-            cn_rsi=adjust_range(node_rsi[1],close_rsi,percent,[10,90])
+            on_rsi=adjust_range(node_rsi[0],open_rsi,percent,[5,95])
+            cn_rsi=adjust_range(node_rsi[1],close_rsi,percent,[5,95])
             new_range=str([on_rsi,cn_rsi])
             update_cell_table('nodes','RSI', trade_type, new_range)
 
         if open_macd!=empty and close_macd!=empty:
-            on_macd=adjust_range(node_macd[0],open_macd,percent,[-90,90])
-            cn_macd=adjust_range(node_macd[1],close_macd,percent,[-90,90])
+            on_macd=adjust_range(node_macd[0],open_macd,percent,[-95,95])
+            cn_macd=adjust_range(node_macd[1],close_macd,percent,[-95,95])
             new_range=str([on_macd,cn_macd])
             update_cell_table('nodes','MACD', trade_type, new_range)
                             
         if open_cmf!=empty and close_cmf!=empty:
-            on_cmf=adjust_range(node_cmf[0],open_cmf,percent,[-0.8,0.8])
-            cn_cmf=adjust_range(node_cmf[1],close_cmf,percent,[-0.8,0.8])
+            on_cmf=adjust_range(node_cmf[0],open_cmf,percent,[-0.9,0.9])
+            cn_cmf=adjust_range(node_cmf[1],close_cmf,percent,[-0.9,0.9])
             new_range=str([on_cmf,cn_cmf])
             update_cell_table('nodes','CMF', trade_type, new_range)
               
@@ -733,12 +836,74 @@ def rebalance():
         old_TW=ast.literal_eval(read_matching_table('nodes','TW',trade_type))
         new_TW=round((np.tanh(old_TW)),2)
         update_cell_table('nodes','TW', trade_type, new_TW)
+    
+        
+def normalize_percentage_change(oprice, cprice, position_type):
+    """
+    Calculate the percentage change from opening price to closing price
+    and normalize it to a value between -1 and 1.
 
+    Parameters:
+    oprice (float): Opening price.
+    cprice (float): Closing price.
+    position_type (str): Type of position ('FS' for short, 'FL' for long).
+
+    Returns:
+    float: Normalized percentage change in the range [-1, 1].
+    """
+    if oprice == 0:
+        raise ValueError("Opening price cannot be zero")
+    
+    if position_type not in ['FS', 'FL']:
+        raise ValueError("Invalid position type. Must be 'FS' or 'FL'")
+
+    # Calculate percentage change
+    percentage_change = (cprice - oprice) / oprice * 100
+    
+    if position_type == 'FS' and percentage_change>0:
+        # Invert the percentage change for short positions
+        percentage_change = -percentage_change
+    if position_type == 'FL' and percentage_change<0:
+        percentage_change=-percentage_change
+    if position_type == 'FL' and percentage_change>0:
+        percentage_change=-percentage_change
+    # Normalize the percentage change to [-1, 1]
+    normalized_value = percentage_change / 100
+    
+    # Clip the normalized value to ensure it is within [-1, 1]
+    normalized_value = max(min(normalized_value, 1), -1)
+    
+    return normalized_value
+def calculate_adxn(df):    
+    # Calculate ADX
+    adx = ta.adx(high=df['high'], low=df['low'], close=df['close'])
+    # Return the latest ADX value
+    latest_adx = adx['ADX_14'].iloc[-1]
+    return round(latest_adx,2)
+
+def delta_adx(oADX, cADX):
+    """
+    Adjusts the cADX value based on comparison with oADX.
+
+    Parameters:
+    oADX (float): The original ADX value.
+    cADX (float): The comparison ADX value.
+
+    Returns:
+    float: The adjusted value.
+    """
+    if cADX < oADX:
+        return round((100 - (cADX - oADX))/100,2)
+    elif cADX > oADX:
+        return round((100 + (oADX - cADX))/100,2)
+    else:
+        return 1
 ######### Real Trading #############
 def realtrade(bList,BotLimit,lvrg,tinfo):
     client = Client(api_key, api_secret)
     mrgType="ISOLATED"
     x=0
+    oADX={}
     for Ti,ttype in bList.items():
         Lsafe(client, Ti, mrgType, lvrg)
         candles = client.futures_continous_klines(pair=Ti, interval=globalInterval,ContractType='PERPETUAL')
@@ -747,12 +912,14 @@ def realtrade(bList,BotLimit,lvrg,tinfo):
         df['timestart'] = df['timestart'] / 1000
         df['timeend'] = df['timeend'] / 1000
         df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']] = df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']].astype(float)
+        ADXn=calculate_adxn(df)
         if ttype=="FL":
             opprice = df['close'].iloc[-1]
             datetime=get_current_datetime_as_string()
             p=LongOrder(client,Ti,tinfo[Ti],BotLimit,lvrg)
             if p!="null" and p!='':    
                 print("added:",Ti,ttype)
+                oADX[Ti]=ADXn
                 add_tradeLog(Ti,ttype,datetime,opprice,'A',p,ttype)
                 x+=1
         if  ttype=="FS":
@@ -761,11 +928,13 @@ def realtrade(bList,BotLimit,lvrg,tinfo):
             p=ShortOrder(client,Ti,tinfo[Ti],BotLimit,lvrg)
             if p!="null" and p!='':
                 print("added:",Ti,ttype)
+                oADX[Ti]=ADXn
                 add_tradeLog(Ti,ttype,datetime,opprice,'A',p,ttype)
                 x+=1
         if x>=BotLimit:
             break
         sleep(5)
+    print(oADX)
     while True:
         TLog=TradeLog()
         for x in range(len(TLog)):
@@ -782,48 +951,40 @@ def realtrade(bList,BotLimit,lvrg,tinfo):
             TCMF=CMF(df)
             TRSI=rsi(df)
             TMACD=MACD(df)
+            TADXn=calculate_adxn(df)
             amount=read_matching_TLog(Ti, 'amount')
             cprice = df['close'].iloc[-1]
             oprice=read_matching_TLog(Ti, 'opprice')
             add_token_history(Ti,cprice,TCMF,TRSI,TMACD)
             if svresult!='W' and svresult!='L':
+                alpha=cal_alpha_close(TRSI,TCMF,TMACD,ttype)
+                delta=delta_adx(oADX[Ti], TADXn)
+                pp=round(normalize_percentage_change(oprice, cprice, status),2)
+                ru=round((alpha*(delta*delta))+pp,2)
                 if status=='FS':
-                    if oprice>cprice:
-                        close_intensity=is_between_close(TRSI,TCMF,TMACD,status)
-                        if close_intensity>trigger_amount(status):
-                            update_cell_Tlog(Ti, 'status', 'FL')
-                    else:
-                        close_intensity=is_between_close(TRSI,TCMF,TMACD,status)
-                        if close_intensity>trigger_amount(status):
-                            if ttype=='FL':
-                                closeLong(client,amount,Ti)
-                                update_cell_Tlog(Ti, 'result', 'W')
-                                print("trade closed : ", Ti)
-                                break
-                            else:
-                                closeShort(client,amount,Ti)
-                                update_cell_Tlog(Ti, 'result', 'L')
-                                print("trade closed : ", Ti)
-                                break
+                    if ru>0.5:
+                        if oprice>cprice:
+                            closeShort(client,amount,Ti)
+                            update_cell_Tlog(Ti, 'result', 'W')
+                            print("trade closed : ", Ti)
+                            break
+                        else:
+                            closeShort(client,amount,Ti)
+                            update_cell_Tlog(Ti, 'result', 'L')
+                            print("trade closed : ", Ti)
+                            break
                 if status=='FL':
-                    if oprice<cprice:
-                        close_intensity=is_between_close(TRSI,TCMF,TMACD,status)
-                        if close_intensity>trigger_amount(status):
-                            update_cell_Tlog(Ti, 'status', 'FS')
-                    else:
-                        close_intensity=is_between_close(TRSI,TCMF,TMACD,status)
-                        if close_intensity>trigger_amount(status):
-                            if ttype=='FS':                               
-                                closeShort(client,amount,Ti)
-                                update_cell_Tlog(Ti, 'result', 'W')
-                                print("trade closed : ", Ti)
-                                break
-                            else:
-                                closeLong(client,amount,Ti)
-                                update_cell_Tlog(Ti, 'result', 'L')
-                                print("trade closed : ", Ti)
-                                break
-                            
+                    if ru>0.5:
+                        if oprice<cprice:
+                            closeLong(client,amount,Ti)
+                            update_cell_Tlog(Ti, 'result', 'W')
+                            print("trade closed : ", Ti)
+                            break
+                        else:
+                            closeLong(client,amount,Ti)
+                            update_cell_Tlog(Ti, 'result', 'L')
+                            print("trade closed : ", Ti)
+                            break
         TLog=TradeLog()
         if all_w_or_l('result', TLog):
             print("All Trades Done")
@@ -836,6 +997,7 @@ def realtrade(bList,BotLimit,lvrg,tinfo):
 def simtrade(bList,BotLimit,tinfo):
     client = Client(api_key, api_secret)
     x=0
+    oADX={}
     for Ti,ttype in bList.items():
         candles = client.futures_continous_klines(pair=Ti, interval=globalInterval,ContractType='PERPETUAL')
         df = pd.DataFrame(candles)
@@ -843,11 +1005,13 @@ def simtrade(bList,BotLimit,tinfo):
         df['timestart'] = df['timestart'] / 1000
         df['timeend'] = df['timeend'] / 1000
         df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']] = df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']].astype(float)
+        ADXn=calculate_adxn(df)
         if ttype=="FL" or ttype=="RL":
             opprice = df['close'].iloc[-1]
             datetime=get_current_datetime_as_string()
             #add real Trade command here
             print("added:",Ti,ttype)
+            oADX[Ti]=ADXn
             add_tradeLog(Ti,ttype,datetime,opprice,'A','0',ttype)
             x+=1
         if ttype=="RS" or ttype=="FS":
@@ -855,6 +1019,7 @@ def simtrade(bList,BotLimit,tinfo):
             datetime=get_current_datetime_as_string()
             #add real Trade command here
             print("added:",Ti,ttype)
+            oADX[Ti]=ADXn
             add_tradeLog(Ti,ttype,datetime,opprice,'A','0',ttype)
             x+=1
         if x>=BotLimit:
@@ -877,52 +1042,40 @@ def simtrade(bList,BotLimit,tinfo):
             TMACD=MACD(df)
             cprice = df['close'].iloc[-1]
             oprice=read_matching_TLog(Ti, 'opprice')
+            TADXn=calculate_adxn(df)
             add_token_history(Ti, cprice,TCMF,TRSI,TMACD)
-            print(Ti, cprice,TCMF,TRSI,TMACD)
             #i learned something new about if statements
             if svresult!='W' and svresult!='L':
+                alpha=cal_alpha_close(TRSI,TCMF,TMACD,ttype)
+                delta=delta_adx(oADX[Ti], TADXn)
+                pp=round(normalize_percentage_change(oprice, cprice, status),2)
+                ru=round((alpha*(delta*delta))+pp,2)
+                print(Ti,alpha,delta,pp,ru)
                 if status=='FS':
-                    if oprice>cprice:
-                        close_intensity=is_between_close(TRSI,TCMF,TMACD,status)
-                        if close_intensity>trigger_amount(status):
-                            print('Flipped to FL')
-                            update_cell_Tlog(Ti, 'status', 'FL')
-                    else:
-                        close_intensity=is_between_close(TRSI,TCMF,TMACD,status)
-                        if close_intensity>trigger_amount(status):
-                            if ttype=='FL':
-              
-                                update_cell_Tlog(Ti, 'result', 'W')
-                                print("trade closed : ", Ti)
-                                break
-                            else:
-            
-                                update_cell_Tlog(Ti, 'result', 'L')
-                                print("trade closed : ", Ti)
-                                break
+                    if ru>0.5:
+                        if oprice>cprice:
+                            update_cell_Tlog(Ti, 'result', 'W')
+                            print("trade closed : ", Ti)
+                            break
+                        else:
+                            update_cell_Tlog(Ti, 'result', 'L')
+                            print("trade closed : ", Ti)
+                            break
                 if status=='FL':
-                    if oprice<cprice:
-                        close_intensity=is_between_close(TRSI,TCMF,TMACD,status)
-                        if close_intensity>trigger_amount(status):
-                            print('Flipped to FS')
-                            update_cell_Tlog(Ti, 'status', 'FS')
-                    else:
-                        close_intensity=is_between_close(TRSI,TCMF,TMACD,status)
-                        if close_intensity>trigger_amount(status):
-                            if ttype=='FS':                               
-                                update_cell_Tlog(Ti, 'result', 'W')
-                                print("trade closed : ", Ti)
-                                break
-                            else:
-                    
-                                update_cell_Tlog(Ti, 'result', 'L')
-                                print("trade closed : ", Ti)
-                                break
+                    if ru>0.5:
+                        if oprice<cprice:
+                            update_cell_Tlog(Ti, 'result', 'W')
+                            print("trade closed : ", Ti)
+                            break
+                        else:
+                            update_cell_Tlog(Ti, 'result', 'L')
+                            print("trade closed : ", Ti)
+                            break
         TLog=TradeLog()
         if all_w_or_l('result', TLog):
             print("All Trades Done")
             return True
-        sleep(120)
+        sleep(180)
     print("All Trades Done")
     return True
         
@@ -954,12 +1107,12 @@ def main_trader(excludedlist,CurrencyType,BotLimit,lvrg,initial):
             if result==True:
                 print("Now Evaluate")
                 Evaluate_Trades()
-                adjust_and_reflect()
                 rebalance()
+                adjust_and_reflect()
                 clear_Token_History()
                 clear_tradeLog()
         print("sleeping waiting for next cycle")
-        sleep(60)
+        sleep(180)
 
 def simulated_trader(excludedlist,CurrencyType,BotLimit):
     while True:
@@ -969,8 +1122,8 @@ def simulated_trader(excludedlist,CurrencyType,BotLimit):
             if result==True:
                 print("Now Evaluate")
                 Evaluate_Trades()
-                adjust_and_reflect()
                 rebalance()
+                adjust_and_reflect()
                 clear_Token_History()
                 clear_tradeLog()
         print("sleeping waiting for next cycle")
