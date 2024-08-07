@@ -1,8 +1,29 @@
 # -*- coding: utf-8 -*-
 """
-Created on Mon Jan  8 06:16:20 2024
+Created on Mon Jul 22 06:58:25 2024
 
 @author: azzy
+"""
+"""
+how to test
+1.geta tokens data
+2. plot the graphs of indicators and combine them
+3.look at the graph
+4.write simple nerual network that predicts the graph training on the pervious data
+5.plot the predictions and original
+6. look at the graph
+7.check if i want to store the weights or relearn everytime
+
+building phase
+1.find indicator that can show movement in graphs of specfic time interval (ADX,Zscore)
+2.get the top moving tokens and arrange in descending order
+3.preform regression or whatever the method is to predicto 50/50
+4.arrange the tokens based on the longest time spent on either side of the 50/50
+5.trade with the tokens arranged in ascending order
+6.start traded
+7.(this is looping) continue to predict and learn from the latest incoming values
+8.close the trade
+9.rinse and repeat
 """
 from keys import *
 # importing keys
@@ -20,7 +41,15 @@ import operator
 import os
 import sys
 import ast
-globalInterval=Client.KLINE_INTERVAL_3MINUTE
+import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
+from statsmodels.tsa.seasonal import seasonal_decompose
+from statsmodels.tsa.arima.model import ARIMA
+from sklearn.metrics import accuracy_score
+from scipy.signal import find_peaks
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.linear_model import LinearRegression
+globalInterval=Client.KLINE_INTERVAL_15MINUTE
 ########close/open trades###########
 def Lsafe(client,Seed,mrgType,lvrg):
     try:
@@ -108,8 +137,196 @@ def closeShort(client, p, Seed):
     except:
         return "null"
     
-########close/open trades###########
+def TradeLog():
+    if not os.path.exists('TradeLog.csv'):
+        # Create a DataFrame with the desired structure
+        data = {
+            'token': [],
+            'datetime': [],
+            'opprice': [],
+            'result':[],
+            'status': [],
+            'EXP':[],
+            'CT':[]
+        }
+        df = pd.DataFrame(data)
+        df.to_csv('TradeLog.csv', index=False)
+        return df
+    else:
+        df=pd.read_csv('TradeLog.csv')
+        return df
 
+def clear_tradeLog():
+    try:
+        os.remove("TradeLog.csv")
+        print(" TradeLog.csv deleted successfully.")
+    except FileNotFoundError:
+        print("File TradeLog.csv not found.")
+        pass
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
+def add_tradeLog(Ti,datetime, opprice,result,amount,status,EXP,CT):
+    dataframe=TradeLog()
+    new_row = pd.DataFrame({
+        'token': Ti,
+        'datetime': datetime,
+        'opprice': opprice,
+        'amount': amount,
+        'result': result,
+        'status': status,
+        'EXP':EXP,
+        'CT':CT
+    }, index=[0])  # Ensure it's a single row DataFrame
+    
+    dataframe = pd.concat([dataframe, new_row], ignore_index=True)
+    dataframe.to_csv('TradeLog.csv', index=False)
+    
+def update_cell_Tlog(token, column_name, new_value):
+    df=TradeLog()
+    row_index = df.index[df['token'] == token ].tolist()
+    if not row_index:
+        print(f"Indicator '{token}' not found.")
+        return
+    column_index = df.columns.get_loc(column_name)
+    df.iloc[row_index[0], column_index] = new_value
+    df.to_csv('TradeLog.csv', index=False)
+    return True
+
+def read_matching_TLog(token, column_name):
+    df=TradeLog()
+    row_index = df.index[df['token'] == token].tolist()
+    if not row_index:
+        print(f"Indicator '{token}' not found.")
+        return
+    column_index = df.columns.get_loc(column_name)
+    cell_value = df.iloc[row_index[0], column_index]
+    return cell_value
+#########################neural stuff########################
+
+
+# Activation function and its derivative
+def sigmoid(x):
+    # Clip values to avoid overflow in exp
+    x = np.clip(x, -500, 500)
+    return 1 / (1 + np.exp(-x))
+
+def sigmoid_derivative(x):
+    return x * (1 - x)
+
+# Initialize weights with better distribution
+def initialize_weights(input_size, hidden_size, output_size):
+    weights = {
+        'W1': np.random.randn(input_size, hidden_size) * np.sqrt(2.0 / input_size),
+        'b1': np.zeros((1, hidden_size)),
+        'W2': np.random.randn(hidden_size, output_size) * np.sqrt(2.0 / hidden_size),
+        'b2': np.zeros((1, output_size))
+    }
+    return weights
+
+# Load weights if they exist, otherwise initialize them
+def load_or_initialize_weights(filename, input_size, hidden_size, output_size):
+    if os.path.exists(filename):
+        return load_weights(filename)
+    else:
+        return initialize_weights(input_size, hidden_size, output_size)
+
+# Forward pass
+def forward_pass(X, weights):
+    z1 = np.dot(X, weights['W1']) + weights['b1']
+    a1 = sigmoid(z1)
+    z2 = np.dot(a1, weights['W2']) + weights['b2']
+    output = z2  # No activation for output layer (regression problem)
+    return z1, a1, z2, output
+
+# Backward pass
+def backward_pass(X, y, z1, a1, z2, output, weights, learning_rate):
+    m = y.shape[0]
+    d_output = output - y
+    d_W2 = np.dot(a1.T, d_output) / m
+    d_b2 = np.sum(d_output, axis=0, keepdims=True) / m
+    d_a1 = np.dot(d_output, weights['W2'].T)
+    d_z1 = d_a1 * sigmoid_derivative(a1)
+    d_W1 = np.dot(X.T, d_z1) / m
+    d_b1 = np.sum(d_z1, axis=0, keepdims=True) / m
+
+    weights['W1'] -= learning_rate * d_W1
+    weights['b1'] -= learning_rate * d_b1
+    weights['W2'] -= learning_rate * d_W2
+    weights['b2'] -= learning_rate * d_b2
+
+    return weights
+
+# Training function with incremental learning
+def train_network(series):
+    hidden_size = 20
+    learning_rate = 0.01
+    epochs = 1000
+    weight_file = 'weights.npz'
+    input_size = 1
+    output_size = 1
+
+    series = np.array(series).reshape(-1, 1)
+    X = series[:-1]
+    y = series[1:]
+
+    weights = load_or_initialize_weights(weight_file, input_size, hidden_size, output_size)
+
+    for epoch in range(epochs):
+        z1, a1, z2, output = forward_pass(X, weights)
+        weights = backward_pass(X, y, z1, a1, z2, output, weights, learning_rate)
+
+        if epoch % 100 == 0:
+            loss = np.mean((output - y) ** 2)
+            print(f'Epoch {epoch}, Loss: {loss}')
+
+    save_weights(weights, weight_file)
+    return weights
+
+# Save weights
+def save_weights(weights, filename):
+    np.savez(filename, W1=weights['W1'], b1=weights['b1'], W2=weights['W2'], b2=weights['b2'])
+
+# Load weights
+def load_weights(filename):
+    data = np.load(filename)
+    weights = {
+        'W1': data['W1'],
+        'b1': data['b1'],
+        'W2': data['W2'],
+        'b2': data['b2']
+    }
+    return weights
+
+# Predict function
+def predict_next(series):
+    weights = load_weights('weights.npz')
+    series = np.array(series).reshape(-1, 1)
+    X = series[-1].reshape(1, -1)
+    _, _, _, output = forward_pass(X, weights)
+    return output[0, 0]
+
+def count_consecutive_values(series):
+    counts = []
+    count = 1
+    
+    for i in range(1, len(series)):
+        if (series.iloc[i] > 0 and series.iloc[i-1] > 0) or (series.iloc[i] <= 0 and series.iloc[i-1] <= 0):
+            count += 1
+        else:
+            if series.iloc[i-1] > 0:
+                counts.append(count)
+            else:
+                counts.append(-count)
+            count = 1
+    
+    # Append the last count
+    if series.iloc[-1] > 0:
+        counts.append(count)
+    else:
+        counts.append(-count)
+    
+    return pd.Series(counts)
 #################### Get token info #########################
 
 def batchCollector(excludedlist,CurrencyType):
@@ -151,209 +368,86 @@ def FindNewToken(client,exInfo,excludedlist,CurrencyType):
         x+=1
     print('100%')            
     return tokenInfo,symInfo
-# ison= (alpha+theta)/3  
-# omega= alpha + theta + phi + beta
-# ro= (alpha +delta + theta)/3
-def rsi_angle(dataset,ttype,window_size):
-    period=14
-    # Calculate daily returns
-    delta = dataset['close'].diff()
-    
-    # Separate positive and negative gains/losses
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    
-    # Calculate average gain and loss
-    avg_gain = gain.rolling(window=period, min_periods=1).mean()
-    avg_loss = loss.rolling(window=period, min_periods=1).mean()
-    
-    # Calculate the Relative Strength (RS)
-    rs = avg_gain / avg_loss
-    
-    # Calculate the RSI
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Extract the last RSI value and round it to 2 decimal places
-    window_size = 10
-    normalized_angle = calculate_normalized_angle(rsi, window_size)
-    if ttype=='FS' and normalized_angle>0:
-        normalized_angle=0
-    if ttype=='FL' and normalized_angle<0:
-        normalized_angle=0
-    return round(normalized_angle,2)
-    
-
-def cmf_angle(data,ttype,window_size):
-    period = 20
-    mf = ((data['close'] - data['low']) - (data['high'] - data['close'])) / (data['high'] - data['low'])
-    mfv = mf * data['volume']
-    cmf_values = mfv.rolling(period).sum() / data['volume'].rolling(period).sum()
-    cmf_values = cmf_values.dropna()
-    window_size = 10
-    normalized_angle = calculate_normalized_angle(cmf_values, window_size)
-    if ttype=='FS' and normalized_angle>0:
-        normalized_angle=0
-    if ttype=='FL' and normalized_angle<0:
-        normalized_angle=0
-    return round(normalized_angle,2)
-    
-def macd_angle(dataset,ttype,window_size):
-    short_period=12
-    long_period=26
-    signal_period=9
-    # Calculate the short-term EMA (12-day EMA)
-    short_ema = calculate_ema(dataset['close'], short_period)
-    
-    # Calculate the long-term EMA (26-day EMA)
-    long_ema = calculate_ema(dataset['close'], long_period)
-    
-    # Calculate the MACD line
-    macd_line = short_ema - long_ema
-    
-    # Calculate the Signal line (9-day EMA of the MACD line)
-    signal_line = calculate_ema(macd_line, signal_period)
-    
-    # Calculate the MACD Histogram
-    macd_histogram = macd_line - signal_line
-    
-    # Normalize the MACD Histogram to a range from -100 to 100
-    max_abs_histogram = macd_histogram.abs().max()
-    normalized_histogram = (macd_histogram / max_abs_histogram) * 100
-    
-    # Extract the latest MACD, Signal, and Histogram values
-    # latest_macd = round(macd_line.iloc[-1], 2)
-    # latest_signal = round(signal_line.iloc[-1], 2)
-    #latest_histogram = round(normalized_histogram.iloc[-1], 2)
-    normalized_angle = calculate_normalized_angle(normalized_histogram, window_size)
-    if ttype=='FS' and normalized_angle>0:
-        normalized_angle=0
-    if ttype=='FL' and normalized_angle<0:
-        normalized_angle=0
-    return round(normalized_angle,2)
-
-def adx_angle(df,window_size):
-    # Calculate ADX
-    adx = ta.adx(high=df['high'], low=df['low'], close=df['close'])
-    
-    # Return the latest ADX value
-    latest_adx = adx['ADX_14']
-    normalized_angle = calculate_normalized_angle(latest_adx, window_size)
-    return round(normalized_angle,2)
-
-def calculate_normalized_angle(series, window_size):
-    if window_size > len(series):
-        raise ValueError("Window size is larger than the number of rows in the Series")
-    
-    # Extract the last window_size values from the Series
-    y = series.tail(window_size).values
-    x = np.arange(window_size)  # x-coordinates are 0, 1, 2, ..., window_size-1
-
-    # Perform linear regression using the pseudo-inverse for stability
-    A = np.vstack([x, np.ones(len(x))]).T
-    m = np.linalg.pinv(A).dot(y)[0]
-
-    # Convert the slope to an angle in degrees
-    angle = math.degrees(math.atan(m))
-    
-    # Normalize the angle to the range [-1, 1]
-    normalized_angle = angle / 90
-    
-    return normalized_angle
 
 def OpenLayer(TokenInfo):
     ranked_result={}
-    trade_types=['FL','FS']
-    window_size=9
-    for Ti,value in TokenInfo.items():
-        pressurelist={}
-        try:
-            TCMF=CMF(value)
-            TRSI=rsi(value)
-            TMACD=MACD(value)
-            ADX=calculate_adx(value)
-            ADX_angle=adx_angle(value,window_size)
-            for ttype in trade_types:
-                alpha=cal_alpha_open(TRSI,TCMF,TMACD,ttype)
-                ARSI=rsi_angle(value,ttype,window_size)
-                AMACD=macd_angle(value,ttype,window_size)
-                ACMF=cmf_angle(value,ttype,window_size)
-                phi=ast.literal_eval(read_matching_table('nodes','TW', ttype))
-                Beta=(ADX+ADX_angle)
-                theta=(ARSI+ACMF+AMACD)/3
-                ison=((alpha+theta)/2)
-                omega=(ison*(Beta)+phi)
-                # if ison>0.5:
-                intensity=round(omega,2)
-                pressurelist[ttype]=intensity
+    for Ti,df in TokenInfo.items():
+        try:        
+            cmf_series=CMF(df)
+            rsi_series=rsi(df)
+            macd_series=MACD(df)
+            # Combine the normalized and smoothed series
+            series = (cmf_series + rsi_series + macd_series) / 3
+            series = count_consecutive_values(series)
+            # Train the network
+            train_network(series)
         except Exception as e:
             #TokenInfo error Removed from Market or not added yet
-            print("TokenInfo error Removed from Market or not added yet",e)
-            continue
-        bestchoice=get_key_of_higher_number(pressurelist)
-        if bestchoice != None:
-            ranked_result[Ti]=[pressurelist[bestchoice],bestchoice]
+            print("Trainloop error",e)
+            continue   
+    for Ti,df in TokenInfo.items():
+        try:        
+            cmf_series=CMF(df)
+            rsi_series=rsi(df)
+            macd_series=MACD(df)
+            # Combine the normalized and smoothed series
+            series = (cmf_series + rsi_series + macd_series) / 3
+            series = count_consecutive_values(series)
+            # Predict the next element
+            next_element = round(predict_next(series),2)
+            if next_element<0:
+                element=abs(next_element)
+                ranked_result[Ti]=[element,'FS']
+            if next_element>0:
+                element=abs(next_element)
+                ranked_result[Ti]=[element,'FL']
+        except Exception as e:
+            #TokenInfo error Removed from Market or not added yet
+            print("predictloop error",e)
+            continue   
     # Sort the keys based on the first element of the list in descending order
     sorted_keys = sorted(ranked_result.keys(), key=lambda x: ranked_result[x][0], reverse=True)
     # Reorganize the dictionary using the sorted keys
     sorted_ranked_result = {key: ranked_result[key] for key in sorted_keys}
-    Tresult={}
-    for key,item in sorted_ranked_result.items():
-        Tresult[key]=item[1]
-    return Tresult
-
-def get_key_of_higher_number(dictionary):
-    # Initialize variables to keep track of the highest number and its corresponding key
-    highest_number = float('-inf')  # Start with a very low number
-    highest_key = None
-
-    # Iterate through the dictionary
-    for key, value in dictionary.items():
-        # If the current value is higher than the highest number found so far
-        if value > highest_number:
-            highest_number = value
-            highest_key = key
-    # Return the key corresponding to the highest number
-    return highest_key
-
-#problem rippling solution
-def cal_alpha_open(TRSI,TCMF,TMACD,ttype):
-    range_rsi=ast.literal_eval(read_matching_table('nodes','RSI', ttype))[0]
-    range_cmf=ast.literal_eval(read_matching_table('nodes','CMF', ttype))[0]
-    range_macd=ast.literal_eval(read_matching_table('nodes','MACD', ttype))[0]
-    RSI_intensity= intensity_from_mid(TRSI, range_rsi)
-    CMF_intensity= intensity_from_mid(TCMF, range_cmf)
-    MACD_intensity=intensity_from_mid(TMACD, range_macd)
-    average = round(((RSI_intensity) + (CMF_intensity) + (MACD_intensity))/3,2)
-    return average
-
-def cal_alpha_close(TRSI,TCMF,TMACD,ttype):
-    range_rsi=ast.literal_eval(read_matching_table('nodes','RSI', ttype))[1]
-    range_cmf=ast.literal_eval(read_matching_table('nodes','CMF', ttype))[1]
-    range_macd=ast.literal_eval(read_matching_table('nodes','MACD', ttype))[1]
-    RSI_intensity= intensity_from_mid(TRSI, range_rsi)
-    CMF_intensity= intensity_from_mid(TCMF, range_cmf)
-    MACD_intensity=intensity_from_mid(TMACD, range_macd)
-    average = round(((RSI_intensity) + (CMF_intensity) + (MACD_intensity))/3,2)
-    return average
+    return sorted_ranked_result
 
 #################### Get token info #########################
 
 ############# Indicators #############
-def calculate_adx(df):    
-    # Calculate ADX
-    adx = ta.adx(high=df['high'], low=df['low'], close=df['close'])
-    # Return the latest ADX value
-    latest_adx = adx['ADX_14'].iloc[-1]
-    normalized_value = latest_adx / 100
-    return round(normalized_value,2)
 
 def CMF(data):
     period = 20
     mf = ((data['close'] - data['low']) - (data['high'] - data['close'])) / (data['high'] - data['low'])
     mfv = mf * data['volume']
     cmf_values = mfv.rolling(period).sum() / data['volume'].rolling(period).sum()
-    cmf_values = cmf_values.dropna() 
-    return round(cmf_values.iloc[-1],2)
+    
+    # Initialize the full index
+    full_index = np.arange(len(data))
+    
+    # Fill NaN values using linear regression
+    original_series = cmf_values
+    filled_series = original_series.reindex(full_index)
+
+    # Indices of non-NaN values
+    not_nan_indices = np.where(~np.isnan(filled_series))[0]
+    # Indices of NaN values
+    nan_indices = np.where(np.isnan(filled_series))[0]
+
+    # Perform linear regression if there are NaN values
+    if len(nan_indices) > 0:
+        reg = LinearRegression()
+        if len(not_nan_indices) > 1:  # Only fit if there are enough points
+            reg.fit(not_nan_indices.reshape(-1, 1), filled_series.dropna().values)
+            # Predict NaN values
+            filled_series[nan_indices] = reg.predict(nan_indices.reshape(-1, 1))
+        
+        # If filled_series is still NaN at index 0, fill it with the first non-NaN value
+        if np.isnan(filled_series[0]):
+            filled_series[0] = filled_series.dropna().iloc[0]
+
+    normalized_series = 2 * (filled_series - filled_series.min()) / (filled_series.max() - filled_series.min()) - 1
+    return normalized_series
+
 
 def rsi(dataset, period=14):
     # Calculate daily returns
@@ -372,14 +466,35 @@ def rsi(dataset, period=14):
     
     # Calculate the RSI
     rsi = 100 - (100 / (1 + rs))
+    normalized_rsi = 2 * (rsi - 50) / 100
     
-    # Extract the last RSI value and round it to 2 decimal places
-    rsi_value = round(rsi.iloc[-1], 2)
-    
-    return rsi_value
+    # Fill NaN values using linear regression
+    original_series = normalized_rsi
+    full_index = np.arange(len(dataset))
+    filled_series = original_series.reindex(full_index)
 
-def calculate_ema(series, span):
-    return series.ewm(span=span, adjust=False).mean()
+    # Indices of non-NaN values
+    not_nan_indices = np.where(~np.isnan(filled_series))[0]
+    # Indices of NaN values
+    nan_indices = np.where(np.isnan(filled_series))[0]
+
+    # Perform linear regression if there are NaN values
+    if len(nan_indices) > 0:
+        reg = LinearRegression()
+        if len(not_nan_indices) > 1:  # Only fit if there are enough points
+            reg.fit(not_nan_indices.reshape(-1, 1), filled_series.dropna().values)
+            # Predict NaN values
+            filled_series[nan_indices] = reg.predict(nan_indices.reshape(-1, 1))
+        
+        # If filled_series is still NaN at index 0, fill it with the first non-NaN value
+        if np.isnan(filled_series[0]):
+            filled_series[0] = filled_series.dropna().iloc[0]
+
+    normalized_series = 2 * (filled_series - filled_series.min()) / (filled_series.max() - filled_series.min()) - 1
+    return normalized_series
+
+def calculate_ema(series, period):
+    return series.ewm(span=period, adjust=False).mean()
 
 def MACD(dataset, short_period=12, long_period=26, signal_period=9):
     # Calculate the short-term EMA (12-day EMA)
@@ -401,424 +516,37 @@ def MACD(dataset, short_period=12, long_period=26, signal_period=9):
     max_abs_histogram = macd_histogram.abs().max()
     normalized_histogram = (macd_histogram / max_abs_histogram) * 100
     
-    # Extract the latest MACD, Signal, and Histogram values
-    # latest_macd = round(macd_line.iloc[-1], 2)
-    # latest_signal = round(signal_line.iloc[-1], 2)
-    latest_histogram = round(normalized_histogram.iloc[-1], 2)
-    
-    return int(latest_histogram)
+    # Fill NaN values using linear regression
+    original_series = normalized_histogram
+    full_index = np.arange(len(dataset))
+    filled_series = original_series.reindex(full_index)
 
+    # Indices of non-NaN values
+    not_nan_indices = np.where(~np.isnan(filled_series))[0]
+    # Indices of NaN values
+    nan_indices = np.where(np.isnan(filled_series))[0]
 
-def intensity_from_mid(number, range_list):
-    if len(range_list) != 2:
-        raise ValueError("Range list must contain exactly two elements.")
-    
-    # Sort the range automatically
-    sorted_range = sorted(range_list)
-    range_start, range_end = sorted_range[0], sorted_range[1]
-
-    if range_start == range_end:
-        raise ValueError("Range start and end cannot be the same.")
-    
-    if not (range_start <= number <= range_end):
-        return 0  # If the number is out of the specified range, intensity is 0.
-
-    # Calculate the midpoint of the range
-    midpoint = (range_start + range_end) / 2
-
-    # Calculate the distance of the number from the midpoint
-    distance_from_midpoint = abs(number - midpoint)
-
-    # Calculate the maximum distance from the midpoint (half the range)
-    max_distance = (range_end - range_start) / 2
-
-    # Calculate the intensity based on the distance from the midpoint
-    intensity = 1 - (distance_from_midpoint / max_distance)
-    
-    return intensity
-
-############# Indicators #############
-
-########################database##############
-
-def nodes():
-    if not os.path.exists('nodes.csv'):
-        # Create a DataFrame with the desired structure
-        data = {
-            'IND': ['RSI', 'CMF', 'MACD', 'TW'],
-            'FS': ['[[20, 30], [65, 75]]', '[[-0.4, -0.1], [0.4, 0.1]]', '[[-20, -10], [10, 20]]', '0.0'],
-            'FL': ['[[65, 75], [20, 30]]', '[[0.1, 0.4], [-0.4, -0.1]]', '[[10, 20], [-10, -20]]', '0.0']
-        }
-        df = pd.DataFrame(data)
-        df.to_csv('nodes.csv', index=False)
-        return df
-    else:
-        df=pd.read_csv('nodes.csv')
-        return df
-def reflections():
-    if not os.path.exists('reflections.csv'):
-        # Create a DataFrame with the desired structure
-        data = {
-            'IND': ['RSI','CMF','MACD','TNUM'],
-            'ref': ['[6969,6969]','[6969,6969]','[6969,6969]','0'],
-            }
-        df = pd.DataFrame(data)
-        df.to_csv('reflections.csv', index=False)
-        return df
-    else:
-        df=pd.read_csv('reflections.csv')
-        return df
-    
-def read_matching_table(table,indicator, column_name):
-    if table=='nodes':   
-        df=nodes()
-        row_index = df.index[df['IND'] == indicator].tolist()
-        if not row_index:
-            print(f"Indicator '{indicator}' not found.")
-            return
-        column_index = df.columns.get_loc(column_name)
-        cell_value = df.iloc[row_index[0], column_index]
-        return cell_value
-    if table=='reflections':
-        df=reflections()
-        row_index = df.index[df['IND'] == indicator].tolist()
-        if not row_index:
-            print(f"Indicator '{indicator}' not found.")
-            return
-        column_index = df.columns.get_loc(column_name)
-        cell_value = df.iloc[row_index[0], column_index]
-        return cell_value
-    
-def update_cell_table(table,indicator, column_name, new_value):
-    if table=='nodes':
-        df=nodes()
-        row_index = df.index[df['IND'] == indicator].tolist()
-        if not row_index:
-            print(f"Indicator '{indicator}' not found.")
-            return
-        column_index = df.columns.get_loc(column_name)
-        df.iloc[row_index[0], column_index] = new_value
-        df.to_csv('nodes.csv', index=False)
-        return True
-    if table=='reflections':
-        df=reflections()
-        row_index = df.index[df['IND'] == indicator].tolist()
-        if not row_index:
-            print(f"Indicator '{indicator}' not found.")
-            return
-        column_index = df.columns.get_loc(column_name)
-        df.iloc[row_index[0], column_index] = new_value
-        df.to_csv('reflections.csv', index=False)
-        return True
-
-def multiTokenHistory():
-    if not os.path.exists('multiTokenHistory.csv'):
-        # Create a DataFrame with the desired structure
-        data = {
-            'token': [],
-            'price': [],
-            'CMF': [],
-            'RSI': [],
-            'MACD': []
-        }
-        df = pd.DataFrame(data)
-        df.to_csv('multiTokenHistory.csv', index=False)
-        return df
-    else:
-        df=pd.read_csv('multiTokenHistory.csv')
-        return df
-
-def TradeLog():
-    if not os.path.exists('TradeLog.csv'):
-        # Create a DataFrame with the desired structure
-        data = {
-            'token': [],
-            'type': [],
-            'datetime': [],
-            'opprice': [],
-            'result':[],
-            'status': []
-        }
-        df = pd.DataFrame(data)
-        df.to_csv('TradeLog.csv', index=False)
-        return df
-    else:
-        df=pd.read_csv('TradeLog.csv')
-        return df
-
-def clear_tradeLog():
-    try:
-        os.remove("TradeLog.csv")
-        print(" TradeLog.csv deleted successfully.")
-    except FileNotFoundError:
-        print("File TradeLog.csv not found.")
-        pass
-    except Exception as e:
-        print(f"An error occurred: {e}")
-
-def add_tradeLog(Ti, ttype, datetime, opprice,result,amount,status):
-    dataframe=TradeLog()
-    new_row = pd.DataFrame({
-        'token': Ti,
-        'type': ttype,
-        'datetime': datetime,
-        'opprice': opprice,
-        'amount': amount,
-        'result': result,
-        'status': status
-    }, index=[0])  # Ensure it's a single row DataFrame
-    
-    dataframe = pd.concat([dataframe, new_row], ignore_index=True)
-    dataframe.to_csv('TradeLog.csv', index=False)
-    
-def update_cell_Tlog(token, column_name, new_value):
-    df=TradeLog()
-    row_index = df.index[df['token'] == token ].tolist()
-    if not row_index:
-        print(f"Indicator '{token}' not found.")
-        return
-    column_index = df.columns.get_loc(column_name)
-    df.iloc[row_index[0], column_index] = new_value
-    df.to_csv('TradeLog.csv', index=False)
-    return True
-
-def read_matching_TLog(token, column_name):
-    df=TradeLog()
-    row_index = df.index[df['token'] == token].tolist()
-    if not row_index:
-        print(f"Indicator '{token}' not found.")
-        return
-    column_index = df.columns.get_loc(column_name)
-    cell_value = df.iloc[row_index[0], column_index]
-    return cell_value
-
-
-def clear_Token_History():
-    try:
-        os.remove("multiTokenHistory.csv")
-        print(" multiTokenHistory.csv deleted successfully.")
-    except FileNotFoundError:
-        print("File multiTokenHistory.csv not found.")
-        pass
-    except Exception as e:
-        print(f"An error occurred: {e}")
-        pass
-
-def filter_multi_trade(column_name, match_string):
-    df = multiTokenHistory()
-    
-    # Check if the column exists in the DataFrame
-    if column_name not in df.columns:
-        raise ValueError(f"Column '{column_name}' does not exist in the DataFrame.")
-    
-    # Filter the DataFrame
-    filtered_df = df[df[column_name] == match_string]
-    
-    # Reset the index of the filtered DataFrame
-    filtered_df = filtered_df.reset_index(drop=True)
-    
-    return filtered_df
-
-def add_token_history(sym, cprice, TCMF,TRSI,TMACD):
-    dataframe=multiTokenHistory()
-    new_row = pd.DataFrame({
-        'token': sym,
-        'price': cprice,
-        'CMF': TCMF,
-        'RSI': TRSI,
-        'MACD': TMACD
-    }, index=[0])  # Ensure it's a single row DataFrame
-    
-    dataframe = pd.concat([dataframe, new_row], ignore_index=True)
-    dataframe.to_csv("multiTokenHistory.csv", index=False)    
-########################database##############
-
-###############Logic###################
-
-def percentage_change(old_price, new_price):
-    """
-    Calculates and prints the percentage change between old_price and new_price.
-
-    Parameters:
-    old_price (float): The initial price.
-    new_price (float): The new price.
-
-    Returns:
-    float: The percentage change between old_price and new_price.
-    """
-    if old_price == 0:
-        raise ValueError("Old price cannot be zero")
-    
-    # Calculate the percentage change
-    change = ((new_price - old_price) / old_price) * 100
-    
-    return abs(round(change,0))
-
-def Evaluate_Trades():
-    TLog=TradeLog()
-    for index,item in TLog.iterrows():
-        the_token=item['token']
-        trade_type=item['type']
-        trade_result=item['result']
-        tokenhistory=filter_multi_trade('token', the_token)
-        row_with_smallest_value = tokenhistory['price'].idxmin()
-        row_with_largest_value = tokenhistory['price'].idxmax()
-        sprice=tokenhistory.iloc[row_with_smallest_value]['price']
-        lprice=tokenhistory.iloc[row_with_largest_value]['price']
-        print(row_with_largest_value, row_with_smallest_value)
-        price_change=percentage_change(sprice, lprice)
-        print('price change in perecentage:',price_change)
-        weight=round(price_change/100,2)
-        if trade_result=="L":
-            sub_weight(weight,trade_type)
-        if trade_result=="W":
-            add_weight(weight,trade_type) adjsut closing side when win
-                 
-        TCMF_o=tokenhistory.iloc[row_with_smallest_value]['CMF']
-        TRSI_o=tokenhistory.iloc[row_with_smallest_value]['RSI']
-        TMACD_o=tokenhistory.iloc[row_with_smallest_value]['MACD']
+    # Perform linear regression if there are NaN values
+    if len(nan_indices) > 0:
+        reg = LinearRegression()
+        if len(not_nan_indices) > 1:  # Only fit if there are enough points
+            reg.fit(not_nan_indices.reshape(-1, 1), filled_series.dropna().values)
+            # Predict NaN values
+            filled_series[nan_indices] = reg.predict(nan_indices.reshape(-1, 1))
         
-        TCMF_c=tokenhistory.iloc[row_with_largest_value]['CMF']
-        TRSI_c=tokenhistory.iloc[row_with_largest_value]['RSI']
-        TMACD_c=tokenhistory.iloc[row_with_largest_value]['MACD']
+        # If filled_series is still NaN at index 0, fill it with the first non-NaN value
+        if np.isnan(filled_series[0]):
+            filled_series[0] = filled_series.dropna().iloc[0]
 
-        print(TCMF_o,TRSI_o,TMACD_o,TCMF_c,TRSI_c,TMACD_c,'ref')
-        updatereflections(TCMF_o,TRSI_o,TMACD_o,TCMF_c,TRSI_c,TMACD_c,'ref')
-            
-                
-def add_weight(weight,trade_type):
-    old_TW=ast.literal_eval(read_matching_table('nodes','TW',trade_type))
-    new_TW=round((old_TW + weight),2)
-    update_cell_table('nodes','TW', trade_type, new_TW)
-    
-def sub_weight(weight,trade_type):
-    old_TW=ast.literal_eval(read_matching_table('nodes','TW',trade_type))
-    new_TW=round((old_TW - weight),2)
-    update_cell_table('nodes','TW', trade_type, new_TW)
+    normalized_series = 2 * (filled_series - filled_series.min()) / (filled_series.max() - filled_series.min()) - 1
+    return normalized_series
 
-def running_average(previous_avg, new_number, total_items):
-    if total_items == 0:
-        return new_number
-    else:
-        return round((previous_avg * total_items + new_number) / (total_items + 1),2)
-             
-def updatereflections(TCMF_o,TRSI_o,TMACD_o,TCMF_c,TRSI_c,TMACD_c,ttype):
-    base=6969
-    range_rsi=ast.literal_eval(read_matching_table('reflections','RSI', ttype))
-    range_cmf=ast.literal_eval(read_matching_table('reflections','CMF', ttype))
-    range_macd=ast.literal_eval(read_matching_table('reflections','MACD', ttype))
-    if range_rsi[0]==base:
-        range_rsi=[0,range_rsi[1]]
-    if range_rsi[1]==base:
-        range_rsi=[range_rsi[0],0]
-    if range_cmf[0]==base:
-        range_cmf=[0,range_cmf[1]]
-    if range_cmf[1]==base:
-        range_cmf=[range_cmf[0],0]
-    if range_macd[0]==base:
-        range_macd=[0,range_macd[1]]
-    if range_macd[1]==base:
-        range_macd=[range_macd[0],0]
-    TNUM=ast.literal_eval(read_matching_table('reflections','TNUM', ttype))
-    TNUM=TNUM + 1
-    update_cell_table('reflections','TNUM', ttype, TNUM)
-    TNUM=ast.literal_eval(read_matching_table('reflections','TNUM', ttype))
-    range_rsi=str([running_average(range_rsi[0], TRSI_o, TNUM),running_average(range_rsi[1], TRSI_c, TNUM)])
-    range_cmf=str([running_average(range_cmf[0], TCMF_o, TNUM),running_average(range_cmf[1], TCMF_c, TNUM)])
-    range_macd=str([running_average(range_macd[0], TMACD_o, TNUM),running_average(range_macd[1], TMACD_c, TNUM)])
-    update_cell_table('reflections','RSI', ttype, range_rsi)
-    update_cell_table('reflections','CMF', ttype, range_cmf)
-    update_cell_table('reflections','MACD', ttype, range_macd)
+def z_score(series):
+    return (series - series.mean()) / series.std()
 
-def adjust_range(range_list, target_number, percentage, limits):
-    if len(range_list) != 2 or len(limits) != 2:
-        raise ValueError("Range list and limits must each contain exactly two elements.")
-    
-    range_start, range_end = range_list
-    limit_start, limit_end = limits
+def moving_average(series, window=14):
+    return series.rolling(window=window, min_periods=1).mean()
 
-    # Normalize the range and limits
-    if range_start < range_end:
-        lower_bound, upper_bound = range_start, range_end
-    else:
-        lower_bound, upper_bound = range_end, range_start
-
-    if limit_start < limit_end:
-        lower_limit, upper_limit = limit_start, limit_end
-    else:
-        lower_limit, upper_limit = limit_end, limit_start
-
-    range_length = upper_bound - lower_bound
-    mid_point = (lower_bound + upper_bound) / 2
-
-    if percentage < -1 or percentage > 1:
-        raise ValueError("Percentage must be between -1 and 1.")
-    
-    # Calculate the adjustment distance
-    adjustment_distance = (target_number - mid_point) * percentage
-    
-    # Calculate new mid-point
-    new_mid_point = mid_point + adjustment_distance
-    
-    # Calculate new bounds
-    new_lower_bound = new_mid_point - range_length / 2
-    new_upper_bound = new_mid_point + range_length / 2
-
-    # Ensure new bounds do not exceed limits
-    if new_lower_bound < lower_limit:
-        new_lower_bound = lower_limit
-        new_upper_bound = lower_limit + range_length
-    if new_upper_bound > upper_limit:
-        new_upper_bound = upper_limit
-        new_lower_bound = upper_limit - range_length
-    
-    return [round(new_lower_bound,2), round(new_upper_bound,2)]
-
-def adjust_and_reflect():
-    empty=6969
-    TLog=TradeLog()
-    for index,item in TLog.iterrows():
-        trade_type=item['type']
-        ref_rsi=ast.literal_eval(read_matching_table('reflections','RSI', 'ref'))
-        ref_macd=ast.literal_eval(read_matching_table('reflections','MACD', 'ref'))
-        ref_cmf=ast.literal_eval(read_matching_table('reflections','CMF', 'ref'))
-        percent=ast.literal_eval(read_matching_table('nodes','TW',trade_type))
-        node_rsi=ast.literal_eval(read_matching_table('nodes','RSI', trade_type))
-        node_macd=ast.literal_eval(read_matching_table('nodes','MACD', trade_type))
-        node_cmf=ast.literal_eval(read_matching_table('nodes','CMF', trade_type))
-        if trade_type=='FL':
-            open_rsi=ref_rsi[1]
-            open_cmf=ref_cmf[1]
-            open_macd=ref_macd[1]
-            close_rsi=ref_rsi[0]
-            close_cmf=ref_cmf[0]
-            close_macd=ref_macd[0]
-        if trade_type=='FS':
-            open_rsi=ref_rsi[0]
-            open_cmf=ref_cmf[0]
-            open_macd=ref_macd[0]
-            close_rsi=ref_rsi[1]
-            close_cmf=ref_cmf[1]
-            close_macd=ref_macd[1]
-
-        if open_rsi!=empty and close_rsi!=empty:
-            on_rsi=adjust_range(node_rsi[0],open_rsi,percent,[5,95])
-            cn_rsi=adjust_range(node_rsi[1],close_rsi,percent,[5,95])
-            new_range=str([on_rsi,cn_rsi])
-            update_cell_table('nodes','RSI', trade_type, new_range)
-
-        if open_macd!=empty and close_macd!=empty:
-            on_macd=adjust_range(node_macd[0],open_macd,percent,[-95,95])
-            cn_macd=adjust_range(node_macd[1],close_macd,percent,[-95,95])
-            new_range=str([on_macd,cn_macd])
-            update_cell_table('nodes','MACD', trade_type, new_range)
-                            
-        if open_cmf!=empty and close_cmf!=empty:
-            on_cmf=adjust_range(node_cmf[0],open_cmf,percent,[-0.9,0.9])
-            cn_cmf=adjust_range(node_cmf[1],close_cmf,percent,[-0.9,0.9])
-            new_range=str([on_cmf,cn_cmf])
-            update_cell_table('nodes','CMF', trade_type, new_range)
-              
 def all_w_or_l(column_name, df):
     # Check if the column exists in the DataFrame
     if column_name not in df.columns:
@@ -830,80 +558,12 @@ def all_w_or_l(column_name, df):
     else:
         return False
     
-def rebalance():
-    t_types=['FL','FS']
-    for trade_type in t_types:
-        old_TW=ast.literal_eval(read_matching_table('nodes','TW',trade_type))
-        new_TW=round((np.tanh(old_TW)),2)
-        update_cell_table('nodes','TW', trade_type, new_TW)
-    
-        
-def normalize_percentage_change(oprice, cprice, position_type):
-    """
-    Calculate the percentage change from opening price to closing price
-    and normalize it to a value between -1 and 1.
-
-    Parameters:
-    oprice (float): Opening price.
-    cprice (float): Closing price.
-    position_type (str): Type of position ('FS' for short, 'FL' for long).
-
-    Returns:
-    float: Normalized percentage change in the range [-1, 1].
-    """
-    if oprice == 0:
-        raise ValueError("Opening price cannot be zero")
-    
-    if position_type not in ['FS', 'FL']:
-        raise ValueError("Invalid position type. Must be 'FS' or 'FL'")
-
-    # Calculate percentage change
-    percentage_change = (cprice - oprice) / oprice * 100
-    
-    if position_type == 'FS' and percentage_change>0:
-        # Invert the percentage change for short positions
-        percentage_change = -percentage_change
-    if position_type == 'FL' and percentage_change<0:
-        percentage_change=-percentage_change
-    if position_type == 'FL' and percentage_change>0:
-        percentage_change=-percentage_change
-    # Normalize the percentage change to [-1, 1]
-    normalized_value = percentage_change / 100
-    
-    # Clip the normalized value to ensure it is within [-1, 1]
-    normalized_value = max(min(normalized_value, 1), -1)
-    
-    return normalized_value
-def calculate_adxn(df):    
-    # Calculate ADX
-    adx = ta.adx(high=df['high'], low=df['low'], close=df['close'])
-    # Return the latest ADX value
-    latest_adx = adx['ADX_14'].iloc[-1]
-    return round(latest_adx,2)
-
-def delta_adx(oADX, cADX):
-    """
-    Adjusts the cADX value based on comparison with oADX.
-
-    Parameters:
-    oADX (float): The original ADX value.
-    cADX (float): The comparison ADX value.
-
-    Returns:
-    float: The adjusted value.
-    """
-    if cADX < oADX:
-        return round((100 - (cADX - oADX))/100,2)
-    elif cADX > oADX:
-        return round((100 + (oADX - cADX))/100,2)
-    else:
-        return 1
-######### Real Trading #############
-def realtrade(bList,BotLimit,lvrg,tinfo):
+############# Indicators #############    
+########close/open trades########### add_tradeLog(Ti,datetime, opprice,result,amount,status,EXP)
+def Rtrade(bList,BotLimit,lvrg,tinfo,mode):
     client = Client(api_key, api_secret)
     mrgType="ISOLATED"
     x=0
-    oADX={}
     for Ti,ttype in bList.items():
         Lsafe(client, Ti, mrgType, lvrg)
         candles = client.futures_continous_klines(pair=Ti, interval=globalInterval,ContractType='PERPETUAL')
@@ -912,175 +572,106 @@ def realtrade(bList,BotLimit,lvrg,tinfo):
         df['timestart'] = df['timestart'] / 1000
         df['timeend'] = df['timeend'] / 1000
         df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']] = df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']].astype(float)
-        ADXn=calculate_adxn(df)
-        if ttype=="FL":
+        if ttype[1]=="FL":
             opprice = df['close'].iloc[-1]
             datetime=get_current_datetime_as_string()
-            p=LongOrder(client,Ti,tinfo[Ti],BotLimit,lvrg)
-            if p!="null" and p!='':    
+            if mode=='R':
+                p=LongOrder(client,Ti,tinfo[Ti],BotLimit,lvrg)
+                if p!="null" and p!='':    
+                    print("added:",Ti,ttype)
+                    add_tradeLog(Ti,datetime,opprice,'A',p,ttype[1],ttype[0],0)
+                    x+=1
+            else:
                 print("added:",Ti,ttype)
-                oADX[Ti]=ADXn
-                add_tradeLog(Ti,ttype,datetime,opprice,'A',p,ttype)
+                add_tradeLog(Ti,datetime,opprice,'A','nan',ttype[1],ttype[0],0)
                 x+=1
-        if  ttype=="FS":
+        if  ttype[1]=="FS":
             opprice = df['close'].iloc[-1]
             datetime=get_current_datetime_as_string()
-            p=ShortOrder(client,Ti,tinfo[Ti],BotLimit,lvrg)
-            if p!="null" and p!='':
+            if mode=='R':
+                p=ShortOrder(client,Ti,tinfo[Ti],BotLimit,lvrg)
+                if p!="null" and p!='':
+                    print("added:",Ti,ttype)
+                    add_tradeLog(Ti,datetime,opprice,'A',p,ttype[1],ttype[0],0)
+                    x+=1
+            else:
                 print("added:",Ti,ttype)
-                oADX[Ti]=ADXn
-                add_tradeLog(Ti,ttype,datetime,opprice,'A',p,ttype)
+                add_tradeLog(Ti,datetime,opprice,'A','nan',ttype[1],ttype[0],0)
                 x+=1
         if x>=BotLimit:
             break
         sleep(5)
-    print(oADX)
     while True:
         TLog=TradeLog()
         for x in range(len(TLog)):
-            ttype=TLog.iloc[x]['type']
+            status=TLog.iloc[x]['status']
             svresult=TLog.iloc[x]['result']
             Ti=TLog.iloc[x]['token']
-            status=TLog.iloc[x]['status']
-            candles = client.futures_continous_klines(pair=Ti, interval=globalInterval,ContractType='PERPETUAL')
-            df = pd.DataFrame(candles)
-            df.columns = ['timestart', 'open', 'high', 'low', 'close', 'volume', 'timeend', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'unused_field']
-            df['timestart'] = df['timestart'] / 1000
-            df['timeend'] = df['timeend'] / 1000
-            df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']] = df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']].astype(float)
-            TCMF=CMF(df)
-            TRSI=rsi(df)
-            TMACD=MACD(df)
-            TADXn=calculate_adxn(df)
             amount=read_matching_TLog(Ti, 'amount')
-            cprice = df['close'].iloc[-1]
             oprice=read_matching_TLog(Ti, 'opprice')
-            add_token_history(Ti,cprice,TCMF,TRSI,TMACD)
+            CT=read_matching_TLog(Ti, 'CT')
+            EXP=read_matching_TLog(Ti, 'EXP')
             if svresult!='W' and svresult!='L':
-                alpha=cal_alpha_close(TRSI,TCMF,TMACD,ttype)
-                delta=delta_adx(oADX[Ti], TADXn)
-                pp=round(normalize_percentage_change(oprice, cprice, status),2)
-                ru=round((alpha*(delta*delta))+pp,2)
-                if status=='FS':
-                    if ru>0.5:
-                        if oprice>cprice:
-                            closeShort(client,amount,Ti)
-                            update_cell_Tlog(Ti, 'result', 'W')
-                            print("trade closed : ", Ti)
-                            break
+                if CT>EXP:
+                    candles = client.futures_continous_klines(pair=Ti, interval=globalInterval,ContractType='PERPETUAL')
+                    df = pd.DataFrame(candles)
+                    df.columns = ['timestart', 'open', 'high', 'low', 'close', 'volume', 'timeend', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'unused_field']
+                    df['timestart'] = df['timestart'] / 1000
+                    df['timeend'] = df['timeend'] / 1000
+                    df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']] = df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']].astype(float)
+                    cmf_series=CMF(df)
+                    rsi_series=rsi(df)
+                    macd_series=MACD(df)
+                    cprice = df['close'].iloc[-1]
+                    # Combine the normalized and smoothed series
+                    series = (cmf_series + rsi_series + macd_series) / 3
+                    series = count_consecutive_values(series)
+                    # Train the network
+                    train_network(series)
+                    # Predict the next element
+                    next_element = round(predict_next(series),2)
+                    if status=='FS':
+                        if next_element>0:
+                            if oprice>cprice:
+                                if mode=='R':
+                                    closeShort(client,amount,Ti)
+                                update_cell_Tlog(Ti, 'result', 'W')
+                                print("trade closed : ", Ti)
+                                break
+                            else:
+                                update_cell_Tlog(Ti, 'result', 'L')
+                                print("trade closed : ", Ti)
+                                break
                         else:
-                            closeShort(client,amount,Ti)
-                            update_cell_Tlog(Ti, 'result', 'L')
-                            print("trade closed : ", Ti)
-                            break
-                if status=='FL':
-                    if ru>0.5:
-                        if oprice<cprice:
-                            closeLong(client,amount,Ti)
-                            update_cell_Tlog(Ti, 'result', 'W')
-                            print("trade closed : ", Ti)
-                            break
+                            EXP= next_element+CT
+                            update_cell_Tlog(Ti, 'EXP', EXP)
+                    if status=='FL':
+                        if next_element<0:
+                            if oprice<cprice:
+                                if mode=='R':
+                                    closeLong(client,amount,Ti)
+                                update_cell_Tlog(Ti, 'result', 'W')
+                                print("trade closed : ", Ti)
+                                break
+                            else:
+                                update_cell_Tlog(Ti, 'result', 'L')
+                                print("trade closed : ", Ti)
+                                break
                         else:
-                            closeLong(client,amount,Ti)
-                            update_cell_Tlog(Ti, 'result', 'L')
-                            print("trade closed : ", Ti)
-                            break
+                            EXP= next_element+CT
+                            update_cell_Tlog(Ti, 'EXP', EXP)
+                else:
+                    CT+=1
+                    update_cell_Tlog(Ti, 'CT', CT)
         TLog=TradeLog()
         if all_w_or_l('result', TLog):
             print("All Trades Done")
             return True
-        sleep(180)
+        sleep(900)
     print("All Trades Done")
     return True
-
-#############Logic####################
-def simtrade(bList,BotLimit,tinfo):
-    client = Client(api_key, api_secret)
-    x=0
-    oADX={}
-    for Ti,ttype in bList.items():
-        candles = client.futures_continous_klines(pair=Ti, interval=globalInterval,ContractType='PERPETUAL')
-        df = pd.DataFrame(candles)
-        df.columns = ['timestart', 'open', 'high', 'low', 'close', 'volume', 'timeend', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'unused_field']
-        df['timestart'] = df['timestart'] / 1000
-        df['timeend'] = df['timeend'] / 1000
-        df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']] = df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']].astype(float)
-        ADXn=calculate_adxn(df)
-        if ttype=="FL" or ttype=="RL":
-            opprice = df['close'].iloc[-1]
-            datetime=get_current_datetime_as_string()
-            #add real Trade command here
-            print("added:",Ti,ttype)
-            oADX[Ti]=ADXn
-            add_tradeLog(Ti,ttype,datetime,opprice,'A','0',ttype)
-            x+=1
-        if ttype=="RS" or ttype=="FS":
-            opprice = df['close'].iloc[-1]
-            datetime=get_current_datetime_as_string()
-            #add real Trade command here
-            print("added:",Ti,ttype)
-            oADX[Ti]=ADXn
-            add_tradeLog(Ti,ttype,datetime,opprice,'A','0',ttype)
-            x+=1
-        if x>=BotLimit:
-            break
-    while True:
-        TLog=TradeLog()
-        for x in range(len(TLog)):
-            ttype=TLog.iloc[x]['type']
-            svresult=TLog.iloc[x]['result']
-            Ti=TLog.iloc[x]['token']
-            status=TLog.iloc[x]['status']
-            candles = client.futures_continous_klines(pair=Ti, interval=globalInterval,ContractType='PERPETUAL')
-            df = pd.DataFrame(candles)
-            df.columns = ['timestart', 'open', 'high', 'low', 'close', 'volume', 'timeend', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'unused_field']
-            df['timestart'] = df['timestart'] / 1000
-            df['timeend'] = df['timeend'] / 1000
-            df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']] = df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']].astype(float)
-            TCMF=CMF(df)
-            TRSI=rsi(df)
-            TMACD=MACD(df)
-            cprice = df['close'].iloc[-1]
-            oprice=read_matching_TLog(Ti, 'opprice')
-            TADXn=calculate_adxn(df)
-            add_token_history(Ti, cprice,TCMF,TRSI,TMACD)
-            #i learned something new about if statements
-            if svresult!='W' and svresult!='L':
-                alpha=cal_alpha_close(TRSI,TCMF,TMACD,ttype)
-                delta=delta_adx(oADX[Ti], TADXn)
-                pp=round(normalize_percentage_change(oprice, cprice, status),2)
-                ru=round((alpha*(delta*delta))+pp,2)
-                print(Ti,alpha,delta,pp,ru)
-                if status=='FS':
-                    if ru>0.5:
-                        if oprice>cprice:
-                            update_cell_Tlog(Ti, 'result', 'W')
-                            print("trade closed : ", Ti)
-                            break
-                        else:
-                            update_cell_Tlog(Ti, 'result', 'L')
-                            print("trade closed : ", Ti)
-                            break
-                if status=='FL':
-                    if ru>0.5:
-                        if oprice<cprice:
-                            update_cell_Tlog(Ti, 'result', 'W')
-                            print("trade closed : ", Ti)
-                            break
-                        else:
-                            update_cell_Tlog(Ti, 'result', 'L')
-                            print("trade closed : ", Ti)
-                            break
-        TLog=TradeLog()
-        if all_w_or_l('result', TLog):
-            print("All Trades Done")
-            return True
-        sleep(180)
-    print("All Trades Done")
-    return True
-        
 ########trainer############
-def main_trader(excludedlist,CurrencyType,BotLimit,lvrg,initial):
+def MAIN_TRADER(excludedlist,CurrencyType,BotLimit,lvrg,initial,mode):
     client = Client(api_key, api_secret)
     while True:
         balance = client.futures_account_balance()
@@ -1092,9 +683,6 @@ def main_trader(excludedlist,CurrencyType,BotLimit,lvrg,initial):
             amnt = bal - initial
             client.futures_account_transfer(asset='USDT', amount=amnt, Type=2)
             print("Profit Transfer:", amnt)
-        TNUM=ast.literal_eval(read_matching_table('reflections','TNUM', 'ref'))
-        if TNUM > 1:
-            BotLimit=2
         if bal > 100:
             BotLimit=4
         if bal > 500:
@@ -1102,52 +690,18 @@ def main_trader(excludedlist,CurrencyType,BotLimit,lvrg,initial):
         if bal > 900:
             BotLimit=10
         TokenList,tinfo = batchCollector(excludedlist,CurrencyType)
+        print(TokenList)
         if len(TokenList)>0:
-            result=realtrade(TokenList,BotLimit,lvrg,tinfo)
-            if result==True:
-                print("Now Evaluate")
-                Evaluate_Trades()
-                rebalance()
-                adjust_and_reflect()
-                clear_Token_History()
-                clear_tradeLog()
+            Rtrade(TokenList,BotLimit,lvrg,tinfo,mode)
+        clear_tradeLog()
         print("sleeping waiting for next cycle")
-        sleep(180)
-
-def simulated_trader(excludedlist,CurrencyType,BotLimit):
-    while True:
-        TokenList,tinfo = batchCollector(excludedlist,CurrencyType)
-        if len(TokenList)>0:
-            result=simtrade(TokenList,BotLimit,tinfo)
-            if result==True:
-                print("Now Evaluate")
-                Evaluate_Trades()
-                rebalance()
-                adjust_and_reflect()
-                clear_Token_History()
-                clear_tradeLog()
-        print("sleeping waiting for next cycle")
-        sleep(60)
-
+        sleep(1800)
 clear_tradeLog()
-clear_Token_History()  
-BotLimit=1
+BotLimit=2
+mode='S'
 print("Booting up... ")
-excludedlist=['BTCUSDT','BTCDOMUSDT','USDCUSDT','ETHUSDT']
+excludedlist=['BTCUSDT','BTCDOMUSDT','USDCUSDT','ETHUSDT','XEMUSDT']
 CurrencyType="USDT"
 lvrg=2
 initial_amt=1000
-main_trader(excludedlist,CurrencyType,BotLimit,lvrg,initial_amt)
-#simulated_trader(excludedlist,CurrencyType,BotLimit)
-#Evaluate_Trades()
-#adjust_and_reflect()
-#rebalance()
-#the length of token history should determine the weight 
-#its learning flipped
-#somthing that takes percentage and a range as input and moves that range towards a given number by that  percent
-# the percentage can end up being negative because weights are added when you win a trade and the percentage is higher than 1
-
-# it has to be aware that the token is dead and i am at the tail end of the movement  thanks to kakapepe and wall
-#angle strat and pressure for close
-#previous version the percentage mistake was a blessing
-#it has to be aware of the balance as well
+MAIN_TRADER(excludedlist,CurrencyType,BotLimit,lvrg,initial_amt,mode)
