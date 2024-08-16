@@ -27,7 +27,6 @@ building phase
 """
 from keys import *
 # importing keys
-import multiprocessing
 import pandas as pd
 import numpy as np #computing multidimensionla arrays
 from datetime import datetime
@@ -35,20 +34,11 @@ from time import sleep
 from binance.client import Client
 from binance import *
 from binance.enums import *
-import math
-import pandas_ta as ta
-import operator
 import os
-import sys
-import ast
-import matplotlib.pyplot as plt
-from scipy.optimize import curve_fit
-from statsmodels.tsa.seasonal import seasonal_decompose
-from statsmodels.tsa.arima.model import ARIMA
-from sklearn.metrics import accuracy_score
-from scipy.signal import find_peaks
-from sklearn.preprocessing import MinMaxScaler
 from sklearn.linear_model import LinearRegression
+from sklearn.neural_network import MLPClassifier
+import joblib
+from scipy.integrate import trapezoid  # Correct function
 globalInterval=Client.KLINE_INTERVAL_15MINUTE
 ########close/open trades###########
 def Lsafe(client,Seed,mrgType,lvrg):
@@ -92,9 +82,10 @@ def LongOrder(client, Seed, precision, numBots, lvrg):
             return str(q)
         else:
             return 'null'
-    except:
-        return "null"
-
+    except Exception as e:
+        print("ShortOrder",e)
+        return 'null'
+    
 def ShortOrder(client, Seed, precision, numBots, lvrg):
     balance = client.futures_account_balance()
     bal = None
@@ -120,22 +111,24 @@ def ShortOrder(client, Seed, precision, numBots, lvrg):
             return str(q)
         else:
             return 'null'
-    except:
-        return "null"
+    except Exception as e:
+        print("ShortOrder",e)
+        return 'null'
+        
 
 def closeLong(client, p, Seed):
     try:
         client.futures_create_order(symbol=Seed, type=ORDER_TYPE_MARKET, side=SIDE_SELL, quantity=p, reduceOnly='true')
         return f"Closed long position with quantity {p}"
     except:
-        return "null"
+        return 'null'
 
 def closeShort(client, p, Seed):
     try:
         client.futures_create_order(symbol=Seed, type=ORDER_TYPE_MARKET, side=SIDE_BUY, quantity=p, reduceOnly='true')
         return f"Closed short position with quantity {p}"
     except:
-        return "null"
+        return 'null'
     
 def TradeLog():
     if not os.path.exists('TradeLog.csv'):
@@ -145,9 +138,7 @@ def TradeLog():
             'datetime': [],
             'opprice': [],
             'result':[],
-            'status': [],
-            'EXP':[],
-            'CT':[]
+            'status': []
         }
         df = pd.DataFrame(data)
         df.to_csv('TradeLog.csv', index=False)
@@ -166,7 +157,7 @@ def clear_tradeLog():
     except Exception as e:
         print(f"An error occurred: {e}")
 
-def add_tradeLog(Ti,datetime, opprice,result,amount,status,EXP,CT):
+def add_tradeLog(Ti,datetime, opprice,result,amount,status):
     dataframe=TradeLog()
     new_row = pd.DataFrame({
         'token': Ti,
@@ -174,9 +165,7 @@ def add_tradeLog(Ti,datetime, opprice,result,amount,status,EXP,CT):
         'opprice': opprice,
         'amount': amount,
         'result': result,
-        'status': status,
-        'EXP':EXP,
-        'CT':CT
+        'status': status
     }, index=[0])  # Ensure it's a single row DataFrame
     
     dataframe = pd.concat([dataframe, new_row], ignore_index=True)
@@ -202,131 +191,185 @@ def read_matching_TLog(token, column_name):
     column_index = df.columns.get_loc(column_name)
     cell_value = df.iloc[row_index[0], column_index]
     return cell_value
-#########################neural stuff########################
 
 
-# Activation function and its derivative
-def sigmoid(x):
-    # Clip values to avoid overflow in exp
-    x = np.clip(x, -500, 500)
-    return 1 / (1 + np.exp(-x))
 
-def sigmoid_derivative(x):
-    return x * (1 - x)
-
-# Initialize weights with better distribution
-def initialize_weights(input_size, hidden_size, output_size):
-    weights = {
-        'W1': np.random.randn(input_size, hidden_size) * np.sqrt(2.0 / input_size),
-        'b1': np.zeros((1, hidden_size)),
-        'W2': np.random.randn(hidden_size, output_size) * np.sqrt(2.0 / hidden_size),
-        'b2': np.zeros((1, output_size))
-    }
-    return weights
-
-# Load weights if they exist, otherwise initialize them
-def load_or_initialize_weights(filename, input_size, hidden_size, output_size):
-    if os.path.exists(filename):
-        return load_weights(filename)
-    else:
-        return initialize_weights(input_size, hidden_size, output_size)
-
-# Forward pass
-def forward_pass(X, weights):
-    z1 = np.dot(X, weights['W1']) + weights['b1']
-    a1 = sigmoid(z1)
-    z2 = np.dot(a1, weights['W2']) + weights['b2']
-    output = z2  # No activation for output layer (regression problem)
-    return z1, a1, z2, output
-
-# Backward pass
-def backward_pass(X, y, z1, a1, z2, output, weights, learning_rate):
-    m = y.shape[0]
-    d_output = output - y
-    d_W2 = np.dot(a1.T, d_output) / m
-    d_b2 = np.sum(d_output, axis=0, keepdims=True) / m
-    d_a1 = np.dot(d_output, weights['W2'].T)
-    d_z1 = d_a1 * sigmoid_derivative(a1)
-    d_W1 = np.dot(X.T, d_z1) / m
-    d_b1 = np.sum(d_z1, axis=0, keepdims=True) / m
-
-    weights['W1'] -= learning_rate * d_W1
-    weights['b1'] -= learning_rate * d_b1
-    weights['W2'] -= learning_rate * d_W2
-    weights['b2'] -= learning_rate * d_b2
-
-    return weights
-
-# Training function with incremental learning
-def train_network(series):
-    hidden_size = 20
-    learning_rate = 0.01
-    epochs = 1000
-    weight_file = 'weights.npz'
-    input_size = 1
-    output_size = 1
-
-    series = np.array(series).reshape(-1, 1)
-    X = series[:-1]
-    y = series[1:]
-
-    weights = load_or_initialize_weights(weight_file, input_size, hidden_size, output_size)
-
-    for epoch in range(epochs):
-        z1, a1, z2, output = forward_pass(X, weights)
-        weights = backward_pass(X, y, z1, a1, z2, output, weights, learning_rate)
-
-        if epoch % 100 == 0:
-            loss = np.mean((output - y) ** 2)
-            print(f'Epoch {epoch}, Loss: {loss}')
-
-    save_weights(weights, weight_file)
-    return weights
-
-# Save weights
-def save_weights(weights, filename):
-    np.savez(filename, W1=weights['W1'], b1=weights['b1'], W2=weights['W2'], b2=weights['b2'])
-
-# Load weights
-def load_weights(filename):
-    data = np.load(filename)
-    weights = {
-        'W1': data['W1'],
-        'b1': data['b1'],
-        'W2': data['W2'],
-        'b2': data['b2']
-    }
-    return weights
-
-# Predict function
-def predict_next(series):
-    weights = load_weights('weights.npz')
-    series = np.array(series).reshape(-1, 1)
-    X = series[-1].reshape(1, -1)
-    _, _, _, output = forward_pass(X, weights)
-    return output[0, 0]
-
-def count_consecutive_values(series):
-    counts = []
-    count = 1
+# Updated calculate_peak_areas function
+def calculate_peak_areas(data):
+    """
+    This function takes a pandas Series as input, identifies the peaks and troughs, and calculates the area under each peak.
+    Returns a list of the area under each peak.
+    """
+    x_values = np.arange(len(data))
+    y_values = data.values
     
-    for i in range(1, len(series)):
-        if (series.iloc[i] > 0 and series.iloc[i-1] > 0) or (series.iloc[i] <= 0 and series.iloc[i-1] <= 0):
-            count += 1
+    # Identify the peaks by finding where the slope changes from positive to negative
+    peaks = (np.diff(np.sign(np.diff(y_values))) < 0).nonzero()[0] + 1
+    
+    # Calculate areas under each peak using scipy.integrate.trapezoid
+    areas = []
+    for i in range(len(peaks) - 1):
+        area = trapezoid(y_values[peaks[i]:peaks[i+1]], x_values[peaks[i]:peaks[i+1]])
+        areas.append(area)
+    
+    return areas
+
+def calculate_sequential_cumulative_sum(data):
+    """
+    This function calculates the sequential cumulative sum of consecutive positive or negative areas.
+    Each value in the resulting sequence represents consecutive positive or negative areas added together.
+    """
+    # Calculate the areas under each peak/trough
+    peak_areas = calculate_peak_areas(data)
+    
+    # Calculate the sequential cumulative sum for consecutive positive or negative areas
+    sequential_sum = []
+    cumulative_sum = 0
+    current_sign = np.sign(peak_areas[0])
+    
+    for area in peak_areas:
+        if np.sign(area) == current_sign:
+            cumulative_sum += area
         else:
-            if series.iloc[i-1] > 0:
-                counts.append(count)
-            else:
-                counts.append(-count)
-            count = 1
+            sequential_sum.append(cumulative_sum)
+            cumulative_sum = area
+            current_sign = np.sign(area)
     
-    # Append the last count
-    if series.iloc[-1] > 0:
-        counts.append(count)
-    else:
-        counts.append(-count)
+    # Append the last cumulative sum
+    sequential_sum.append(round(cumulative_sum, 2))
     
-    return pd.Series(counts)
+    return sequential_sum
+
+def sequential_cumulative_sum(data):
+    """
+    This function calculates the sequential cumulative sum of consecutive positive or negative areas
+    and returns the resulting list.
+    """
+    return calculate_sequential_cumulative_sum(data)
+
+
+# Classifier functions
+
+def train_and_process_large_magnitude(series, window_size=5, model_file='large_magnitude_model.pkl'):
+    if len(series) < window_size + 1:
+        raise ValueError("Not enough data to train the model")
+
+    X, y = [], []
+    for i in range(len(series) - window_size):
+        window = series[i:i + window_size]
+        future_value = series[i + window_size]
+        X.append(window)
+        y.append(1 if future_value > 0 else 0)  # 1 for positive trend, 0 for negative trend
+
+    X = np.array(X)
+    y = np.array(y)
+
+    # Ensure X is a 2D array
+    if X.ndim == 1:
+        X = X.reshape(-1, 1)
+
+    try:
+        model = joblib.load(model_file)
+    except FileNotFoundError:
+        model = MLPClassifier(hidden_layer_sizes=(100, 50), activation='tanh', max_iter=1000, random_state=42)
+
+    model.fit(X, y)
+    joblib.dump(model, model_file)
+
+    return model
+
+def detect_large_magnitude(series, window_size=5, model_file='large_magnitude_model.pkl'):
+    model = joblib.load(model_file)
+    
+    if len(series) < window_size + 1:
+        return 0.0, 0.0  # Return 0 probabilities if there is not enough data
+
+    X = []
+    for i in range(len(series) - window_size):
+        window = series[i:i + window_size]
+        X.append(window)
+    
+    X = np.array(X)
+    
+    # Ensure X is a 2D array
+    if X.ndim == 1:
+        X = X.reshape(-1, 1)
+    
+    probabilities = model.predict_proba(X)
+    
+    positive_probability = probabilities[-1, 1]
+    negative_probability = probabilities[-1, 0]
+    
+    return positive_probability, negative_probability
+
+def train_and_process_small_magnitude(series, window_size=5, model_file='small_magnitude_model.pkl'):
+    if len(series) < window_size + 1:
+        raise ValueError("Not enough data to train the model")
+
+    threshold = np.std(series)  # Threshold for small magnitude
+    X, y = [], []
+    for i in range(len(series) - window_size):
+        window = series[i:i + window_size]
+        future_value = series[i + window_size]
+        is_small_magnitude = abs(future_value) < threshold  # Small magnitude detection
+        X.append(window)
+        y.append(1 if is_small_magnitude else 0)
+
+    X = np.array(X)
+    y = np.array(y)
+
+    # Ensure X is a 2D array
+    if X.ndim == 1:
+        X = X.reshape(-1, 1)
+
+    try:
+        model = joblib.load(model_file)
+    except FileNotFoundError:
+        model = MLPClassifier(hidden_layer_sizes=(100, 50), activation='tanh', max_iter=1000, random_state=42)
+        
+    model.fit(X, y)
+    joblib.dump(model, model_file)
+
+    return model
+
+def detect_small_magnitude(series, window_size=5, model_file='small_magnitude_model.pkl'):
+    model = joblib.load(model_file)
+    
+    if len(series) < window_size + 1:
+        return 0.0  # Return 0 probability if there is not enough data
+
+    X = []
+    for i in range(len(series) - window_size):
+        window = series[i:i + window_size]
+        X.append(window)
+    
+    X = np.array(X)
+    
+    # Ensure X is a 2D array
+    if X.ndim == 1:
+        X = X.reshape(-1, 1)
+    
+    probabilities = model.predict_proba(X)
+    
+    small_magnitude_probability = probabilities[-1, 1]  # Probability of small magnitude
+    
+    return small_magnitude_probability
+
+# Combining large and small magnitude probabilities
+
+def get_directional_probability(series):
+    positive_prob, negative_prob = detect_large_magnitude(series)
+    small_magnitude_prob = detect_small_magnitude(series)
+    
+    # Refine probabilities by subtracting the small magnitude probability
+    positive_probability = positive_prob - small_magnitude_prob
+    negative_probability = negative_prob - small_magnitude_prob
+    
+    # Cap probabilities to a maximum of 0.9 and minimum of 0
+    positive_probability = max(min(positive_probability, 0.9), 0)
+    negative_probability = max(min(negative_probability, 0.9), 0)
+    
+    return positive_probability, negative_probability
 #################### Get token info #########################
 
 def batchCollector(excludedlist,CurrencyType):
@@ -362,14 +405,14 @@ def FindNewToken(client,exInfo,excludedlist,CurrencyType):
         if x==30:
             print("30%")
         if x==80:
-            print("80%")
+            print("55%")
         if x==130:
-            print("99%")
-        x+=1
-    print('100%')            
+            print("69%")
+        x+=1           
     return tokenInfo,symInfo
 
 def OpenLayer(TokenInfo):
+    
     ranked_result={}
     for Ti,df in TokenInfo.items():
         try:        
@@ -378,13 +421,25 @@ def OpenLayer(TokenInfo):
             macd_series=MACD(df)
             # Combine the normalized and smoothed series
             series = (cmf_series + rsi_series + macd_series) / 3
-            series = count_consecutive_values(series)
+            series=sequential_cumulative_sum(series)
+            #series = count_consecutive_values(series)
             # Train the network
-            train_network(series)
+            #neuralStuff.train_network(series)
+            # Train the model
+            # Preprocess the data
+            #train_ongoing_cluster_model(series)
+            # Train the model (this will update the model if it already exists)
+            train_and_process_large_magnitude(series)
+            train_and_process_small_magnitude(series)
+            # Train the model and save it
+            #train_ongoing_cluster_model(X, y)
+
+            #model_cont, model_next = train_gbdt(series, look_back=1, epochs=1000)
         except Exception as e:
             #TokenInfo error Removed from Market or not added yet
             print("Trainloop error",e)
-            continue   
+            continue
+    print("90%")
     for Ti,df in TokenInfo.items():
         try:        
             cmf_series=CMF(df)
@@ -392,23 +447,26 @@ def OpenLayer(TokenInfo):
             macd_series=MACD(df)
             # Combine the normalized and smoothed series
             series = (cmf_series + rsi_series + macd_series) / 3
-            series = count_consecutive_values(series)
-            # Predict the next element
-            next_element = round(predict_next(series),2)
-            if next_element<0:
-                element=abs(next_element)
-                ranked_result[Ti]=[element,'FS']
-            if next_element>0:
-                element=abs(next_element)
-                ranked_result[Ti]=[element,'FL']
+            series=sequential_cumulative_sum(series)
+            # train_and_process_large_magnitude(series)
+            # train_and_process_small_magnitude(series)
+            positive_prob, negative_prob = get_directional_probability(series)
+            pp=round(positive_prob,3)
+            pn=round(negative_prob,3)
+            #print(Ti,pp,pn)
+            if pp>pn:
+                ranked_result[Ti]=[pp,'FL']
+            if pn>pp:
+                ranked_result[Ti]=[pn,'FS']
         except Exception as e:
             #TokenInfo error Removed from Market or not added yet
             print("predictloop error",e)
             continue   
     # Sort the keys based on the first element of the list in descending order
-    sorted_keys = sorted(ranked_result.keys(), key=lambda x: ranked_result[x][0], reverse=True)
+    sorted_keys = sorted(ranked_result.keys(), key=lambda x: ranked_result[x][0],reverse=True)
     # Reorganize the dictionary using the sorted keys
     sorted_ranked_result = {key: ranked_result[key] for key in sorted_keys}
+    print("100%")
     return sorted_ranked_result
 
 #################### Get token info #########################
@@ -579,11 +637,11 @@ def Rtrade(bList,BotLimit,lvrg,tinfo,mode):
                 p=LongOrder(client,Ti,tinfo[Ti],BotLimit,lvrg)
                 if p!="null" and p!='':    
                     print("added:",Ti,ttype)
-                    add_tradeLog(Ti,datetime,opprice,'A',p,ttype[1],ttype[0],0)
+                    add_tradeLog(Ti,datetime,opprice,'A',p,ttype[1])
                     x+=1
             else:
                 print("added:",Ti,ttype)
-                add_tradeLog(Ti,datetime,opprice,'A','nan',ttype[1],ttype[0],0)
+                add_tradeLog(Ti,datetime,opprice,'A','nan',ttype[1])
                 x+=1
         if  ttype[1]=="FS":
             opprice = df['close'].iloc[-1]
@@ -592,11 +650,11 @@ def Rtrade(bList,BotLimit,lvrg,tinfo,mode):
                 p=ShortOrder(client,Ti,tinfo[Ti],BotLimit,lvrg)
                 if p!="null" and p!='':
                     print("added:",Ti,ttype)
-                    add_tradeLog(Ti,datetime,opprice,'A',p,ttype[1],ttype[0],0)
+                    add_tradeLog(Ti,datetime,opprice,'A',p,ttype[1])
                     x+=1
             else:
                 print("added:",Ti,ttype)
-                add_tradeLog(Ti,datetime,opprice,'A','nan',ttype[1],ttype[0],0)
+                add_tradeLog(Ti,datetime,opprice,'A','nan',ttype[1])
                 x+=1
         if x>=BotLimit:
             break
@@ -609,60 +667,51 @@ def Rtrade(bList,BotLimit,lvrg,tinfo,mode):
             Ti=TLog.iloc[x]['token']
             amount=read_matching_TLog(Ti, 'amount')
             oprice=read_matching_TLog(Ti, 'opprice')
-            CT=read_matching_TLog(Ti, 'CT')
-            EXP=read_matching_TLog(Ti, 'EXP')
             if svresult!='W' and svresult!='L':
-                if CT>EXP:
-                    candles = client.futures_continous_klines(pair=Ti, interval=globalInterval,ContractType='PERPETUAL')
-                    df = pd.DataFrame(candles)
-                    df.columns = ['timestart', 'open', 'high', 'low', 'close', 'volume', 'timeend', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'unused_field']
-                    df['timestart'] = df['timestart'] / 1000
-                    df['timeend'] = df['timeend'] / 1000
-                    df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']] = df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']].astype(float)
-                    cmf_series=CMF(df)
-                    rsi_series=rsi(df)
-                    macd_series=MACD(df)
-                    cprice = df['close'].iloc[-1]
-                    # Combine the normalized and smoothed series
-                    series = (cmf_series + rsi_series + macd_series) / 3
-                    series = count_consecutive_values(series)
-                    # Train the network
-                    train_network(series)
-                    # Predict the next element
-                    next_element = round(predict_next(series),2)
-                    if status=='FS':
-                        if next_element>0:
-                            if oprice>cprice:
-                                if mode=='R':
-                                    closeShort(client,amount,Ti)
-                                update_cell_Tlog(Ti, 'result', 'W')
-                                print("trade closed : ", Ti)
-                                break
-                            else:
-                                update_cell_Tlog(Ti, 'result', 'L')
-                                print("trade closed : ", Ti)
-                                break
-                        else:
-                            EXP= next_element+CT
-                            update_cell_Tlog(Ti, 'EXP', EXP)
-                    if status=='FL':
-                        if next_element<0:
-                            if oprice<cprice:
-                                if mode=='R':
-                                    closeLong(client,amount,Ti)
-                                update_cell_Tlog(Ti, 'result', 'W')
-                                print("trade closed : ", Ti)
-                                break
-                            else:
-                                update_cell_Tlog(Ti, 'result', 'L')
-                                print("trade closed : ", Ti)
-                                break
-                        else:
-                            EXP= next_element+CT
-                            update_cell_Tlog(Ti, 'EXP', EXP)
-                else:
-                    CT+=1
-                    update_cell_Tlog(Ti, 'CT', CT)
+                candles = client.futures_continous_klines(pair=Ti, interval=globalInterval,ContractType='PERPETUAL')
+                df = pd.DataFrame(candles)
+                df.columns = ['timestart', 'open', 'high', 'low', 'close', 'volume', 'timeend', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'unused_field']
+                df['timestart'] = df['timestart'] / 1000
+                df['timeend'] = df['timeend'] / 1000
+                df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']] = df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']].astype(float)
+                cmf_series=CMF(df)
+                rsi_series=rsi(df)
+                macd_series=MACD(df)
+                cprice = df['close'].iloc[-1]
+                # Combine the normalized and smoothed series
+                series = (cmf_series + rsi_series + macd_series) / 3
+                series=sequential_cumulative_sum(series)
+                # train_and_process_large_magnitude(series)
+                # train_and_process_small_magnitude(series)
+                positive_prob, negative_prob = get_directional_probability(series)
+                pp=round(positive_prob,3)
+                pn=round(negative_prob,3)
+                if status=='FS' and pp>pn:
+                    if oprice>cprice:
+                        if mode=='R':
+                            closeShort(client,amount,Ti)
+                        update_cell_Tlog(Ti, 'result', 'W')
+                        print("trade closed : ", Ti,oprice,cprice, 'W')
+                        break
+                    else:
+                        if mode=='R':
+                            closeShort(client,amount,Ti)
+                        update_cell_Tlog(Ti, 'result', 'L')
+                        print("trade closed : ", Ti,oprice,cprice, 'L')
+                        break        
+                if status=='FL' and pn>pp:
+                    if oprice<cprice:
+                        if mode=='R':
+                            closeLong(client,amount,Ti)
+                        update_cell_Tlog(Ti, 'result', 'W')
+                        print("trade closed : ", Ti,oprice,cprice, 'W')
+                        break
+                    else:
+                        if mode=='R':
+                            closeLong(client,amount,Ti)
+                        update_cell_Tlog(Ti, 'result', 'L')
+                        print("trade closed : ",Ti,oprice,cprice, 'L')
+                        break        
         TLog=TradeLog()
         if all_w_or_l('result', TLog):
             print("All Trades Done")
@@ -690,15 +739,14 @@ def MAIN_TRADER(excludedlist,CurrencyType,BotLimit,lvrg,initial,mode):
         if bal > 900:
             BotLimit=10
         TokenList,tinfo = batchCollector(excludedlist,CurrencyType)
-        print(TokenList)
+        print('tokens found:',len(TokenList))
         if len(TokenList)>0:
             Rtrade(TokenList,BotLimit,lvrg,tinfo,mode)
         clear_tradeLog()
         print("sleeping waiting for next cycle")
-        sleep(1800)
 clear_tradeLog()
 BotLimit=2
-mode='S'
+mode='R'
 print("Booting up... ")
 excludedlist=['BTCUSDT','BTCDOMUSDT','USDCUSDT','ETHUSDT','XEMUSDT']
 CurrencyType="USDT"
