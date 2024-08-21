@@ -4,27 +4,7 @@ Created on Mon Jul 22 06:58:25 2024
 
 @author: azzy
 """
-"""
-how to test
-1.geta tokens data
-2. plot the graphs of indicators and combine them
-3.look at the graph
-4.write simple nerual network that predicts the graph training on the pervious data
-5.plot the predictions and original
-6. look at the graph
-7.check if i want to store the weights or relearn everytime
 
-building phase
-1.find indicator that can show movement in graphs of specfic time interval (ADX,Zscore)
-2.get the top moving tokens and arrange in descending order
-3.preform regression or whatever the method is to predicto 50/50
-4.arrange the tokens based on the longest time spent on either side of the 50/50
-5.trade with the tokens arranged in ascending order
-6.start traded
-7.(this is looping) continue to predict and learn from the latest incoming values
-8.close the trade
-9.rinse and repeat
-"""
 from keys import *
 # importing keys
 import pandas as pd
@@ -34,11 +14,12 @@ from time import sleep
 from binance.client import Client
 from binance import *
 from binance.enums import *
-import os
+from sklearn.neural_network import MLPRegressor, MLPClassifier
+from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LinearRegression
-from sklearn.neural_network import MLPClassifier
 import joblib
-from scipy.integrate import trapezoid  # Correct function
+import os
+from scipy.integrate import trapezoid
 globalInterval=Client.KLINE_INTERVAL_15MINUTE
 ########close/open trades###########
 def Lsafe(client,Seed,mrgType,lvrg):
@@ -192,419 +173,295 @@ def read_matching_TLog(token, column_name):
     cell_value = df.iloc[row_index[0], column_index]
     return cell_value
 
+#############################################################
+# Initialize models
+mlp_classifier = MLPClassifier(hidden_layer_sizes=(100,), max_iter=500, warm_start=True)
+mlp_predictor = MLPClassifier(hidden_layer_sizes=(100,), max_iter=500, warm_start=True)
 
+# Initialize a scaler for the input data
+scaler = StandardScaler()
 
-# Updated calculate_peak_areas function
-def calculate_peak_areas(data):
-    """
-    This function takes a pandas Series as input, identifies the peaks and troughs, and calculates the area under each peak.
-    Returns a list of the area under each peak.
-    """
-    x_values = np.arange(len(data))
-    y_values = data.values
+# Initialize memory to hold the training data
+memory = {
+    'X': [],
+    'y_detection': [],
+    'y_prediction': []
+}
+
+def train_market(areas, significant_threshold=1.0, model_file="models/market_model.pkl"):
+    # Create the directory if it does not exist
+    os.makedirs(os.path.dirname(model_file), exist_ok=True)
+
+    # Preprocess the data
+    X = np.array(areas).reshape(-1, 1)  # Input features
+    X_scaled = scaler.fit_transform(X)
+
+    # Prepare labels for detection (whether the last area is large or not)
+    y_detection = np.array([1 if abs(area) >= significant_threshold else 0 for area in areas])
     
-    # Identify the peaks by finding where the slope changes from positive to negative
-    peaks = (np.diff(np.sign(np.diff(y_values))) < 0).nonzero()[0] + 1
-    
-    # Calculate areas under each peak using scipy.integrate.trapezoid
-    areas = []
-    for i in range(len(peaks) - 1):
-        area = trapezoid(y_values[peaks[i]:peaks[i+1]], x_values[peaks[i]:peaks[i+1]])
-        areas.append(area)
-    
-    return areas
+    # Prepare labels for prediction (whether the current curve will become large)
+    y_prediction = np.roll(y_detection, -1)  # Shift the detection labels to align with the current curve
+    y_prediction[-1] = 0  # No prediction for the last area, but this won't affect training
 
-def calculate_sequential_cumulative_sum(data):
-    """
-    This function calculates the sequential cumulative sum of consecutive positive or negative areas.
-    Each value in the resulting sequence represents consecutive positive or negative areas added together.
-    """
-    # Calculate the areas under each peak/trough
-    peak_areas = calculate_peak_areas(data)
-    
-    # Calculate the sequential cumulative sum for consecutive positive or negative areas
-    sequential_sum = []
-    cumulative_sum = 0
-    current_sign = np.sign(peak_areas[0])
-    
-    for area in peak_areas:
-        if np.sign(area) == current_sign:
-            cumulative_sum += area
-        else:
-            sequential_sum.append(cumulative_sum)
-            cumulative_sum = area
-            current_sign = np.sign(area)
-    
-    # Append the last cumulative sum
-    sequential_sum.append(round(cumulative_sum, 2))
-    
-    return sequential_sum
+    # Store the data for incremental learning
+    memory['X'].append(X_scaled)
+    memory['y_detection'].append(y_detection)
+    memory['y_prediction'].append(y_prediction)
 
-def sequential_cumulative_sum(data):
-    """
-    This function calculates the sequential cumulative sum of consecutive positive or negative areas
-    and returns the resulting list.
-    """
-    return calculate_sequential_cumulative_sum(data)
+    # Convert lists to arrays
+    X_memory = np.vstack(memory['X'])
+    y_detection_memory = np.concatenate(memory['y_detection'])
+    y_prediction_memory = np.concatenate(memory['y_prediction'])
 
+    # Incremental fit to the models
+    mlp_classifier.partial_fit(X_memory, y_detection_memory, classes=[0, 1])
+    mlp_predictor.partial_fit(X_memory, y_prediction_memory, classes=[0, 1])
 
-# Classifier functions
+    # Save the models
+    joblib.dump((mlp_classifier, mlp_predictor, scaler), model_file)
 
-def train_and_process_large_magnitude(series, window_size=5, model_file='large_magnitude_model.pkl'):
-    if len(series) < window_size + 1:
-        raise ValueError("Not enough data to train the model")
+def detect_and_predict(areas, model_file="models/market_model.pkl"):
+    # Load the models
+    mlp_classifier, mlp_predictor, scaler = joblib.load(model_file)
 
-    X, y = [], []
-    for i in range(len(series) - window_size):
-        window = series[i:i + window_size]
-        future_value = series[i + window_size]
-        X.append(window)
-        y.append(1 if future_value > 0 else 0)  # 1 for positive trend, 0 for negative trend
+    # Prepare the data
+    X = np.array(areas).reshape(-1, 1)
 
-    X = np.array(X)
-    y = np.array(y)
+    # Scale the data
+    X_scaled = scaler.transform(X)
 
-    # Ensure X is a 2D array
-    if X.ndim == 1:
-        X = X.reshape(-1, 1)
+    # Detection: Probability that the last area is large
+    last_area = X_scaled[-1].reshape(1, -1)
+    detection_proba = mlp_classifier.predict_proba(last_area)[0, 1]
 
-    try:
-        model = joblib.load(model_file)
-    except FileNotFoundError:
-        model = MLPClassifier(hidden_layer_sizes=(100, 50), activation='tanh', max_iter=1000, random_state=42)
+    # Prediction: Probability that the current curve will become large
+    prediction_proba = mlp_predictor.predict_proba(last_area)[0, 1]
 
-    model.fit(X, y)
-    joblib.dump(model, model_file)
+    # Subtract detection_proba from prediction_proba to form the confidence score
+    combined_confidence = prediction_proba - detection_proba
 
-    return model
+    # Ensure the confidence score is within a reasonable range [0, 1] after subtraction
+    combined_confidence = max(min(combined_confidence, 1), 0)
 
-def detect_large_magnitude(series, window_size=5, model_file='large_magnitude_model.pkl'):
-    model = joblib.load(model_file)
-    
-    if len(series) < window_size + 1:
-        return 0.0, 0.0  # Return 0 probabilities if there is not enough data
-
-    X = []
-    for i in range(len(series) - window_size):
-        window = series[i:i + window_size]
-        X.append(window)
-    
-    X = np.array(X)
-    
-    # Ensure X is a 2D array
-    if X.ndim == 1:
-        X = X.reshape(-1, 1)
-    
-    probabilities = model.predict_proba(X)
-    
-    positive_probability = probabilities[-1, 1]
-    negative_probability = probabilities[-1, 0]
-    
-    return positive_probability, negative_probability
-
-def train_and_process_small_magnitude(series, window_size=5, model_file='small_magnitude_model.pkl'):
-    if len(series) < window_size + 1:
-        raise ValueError("Not enough data to train the model")
-
-    threshold = np.std(series)  # Threshold for small magnitude
-    X, y = [], []
-    for i in range(len(series) - window_size):
-        window = series[i:i + window_size]
-        future_value = series[i + window_size]
-        is_small_magnitude = abs(future_value) < threshold  # Small magnitude detection
-        X.append(window)
-        y.append(1 if is_small_magnitude else 0)
-
-    X = np.array(X)
-    y = np.array(y)
-
-    # Ensure X is a 2D array
-    if X.ndim == 1:
-        X = X.reshape(-1, 1)
-
-    try:
-        model = joblib.load(model_file)
-    except FileNotFoundError:
-        model = MLPClassifier(hidden_layer_sizes=(100, 50), activation='tanh', max_iter=1000, random_state=42)
+    # Calculate the slope between the last two areas
+    if len(areas) > 1:
+        slope = areas[-1] - areas[-2]
         
-    model.fit(X, y)
-    joblib.dump(model, model_file)
+        # If the slope is negative (indicating a peak), reduce confidence
+        if slope < 0:
+            reduction_factor = 1 + (abs(slope) / max(abs(areas[-2]), 1e-6))  # Dynamic reduction based on slope
+            combined_confidence /= reduction_factor
 
-    return model
+    # **New Addition: Volatility Check**
+    if len(areas) > 3:
+        volatility = np.std(areas[-4:])
+        if volatility < 0.1:  # Adjust this threshold based on your data
+            combined_confidence *= 0.5  # Reduce confidence in low volatility conditions
+    
+    # Scale the confidence score to a range of 0 to 10
+    confidence_score = round(combined_confidence * 10, 1)
 
-def detect_small_magnitude(series, window_size=5, model_file='small_magnitude_model.pkl'):
-    model = joblib.load(model_file)
-    
-    if len(series) < window_size + 1:
-        return 0.0  # Return 0 probability if there is not enough data
+    # Determine direction from the last element in areas
+    direction = 1 if areas[-1] > 0 else 0
 
-    X = []
-    for i in range(len(series) - window_size):
-        window = series[i:i + window_size]
-        X.append(window)
-    
-    X = np.array(X)
-    
-    # Ensure X is a 2D array
-    if X.ndim == 1:
-        X = X.reshape(-1, 1)
-    
-    probabilities = model.predict_proba(X)
-    
-    small_magnitude_probability = probabilities[-1, 1]  # Probability of small magnitude
-    
-    return small_magnitude_probability
+    return confidence_score, direction
 
-# Combining large and small magnitude probabilities
+def get_average_confidence(global_confidence_values):
+    return sum(global_confidence_values) / len(global_confidence_values) if global_confidence_values else 0
 
-def get_directional_probability(series):
-    positive_prob, negative_prob = detect_large_magnitude(series)
-    small_magnitude_prob = detect_small_magnitude(series)
-    
-    # Refine probabilities by subtracting the small magnitude probability
-    positive_probability = positive_prob - small_magnitude_prob
-    negative_probability = negative_prob - small_magnitude_prob
-    
-    # Cap probabilities to a maximum of 0.9 and minimum of 0
-    positive_probability = max(min(positive_probability, 0.9), 0)
-    negative_probability = max(min(negative_probability, 0.9), 0)
-    
-    return positive_probability, negative_probability
 #################### Get token info #########################
 
 def batchCollector(excludedlist,CurrencyType):
     client = Client(api_key, api_secret)
     exInfo=client.futures_exchange_info()
-    tokenInf,sinf=FindNewToken(client,exInfo,excludedlist,CurrencyType)
-    Ftoken_list=OpenLayer(tokenInf)
-    return Ftoken_list,sinf
+    tokenInf,sinf=FindNewToken(client,exInfo,CurrencyType)
+    Ftoken_list,global_confidence=OpenLayer(excludedlist,tokenInf)
+    return Ftoken_list,sinf,global_confidence
 
-def TokenInfo(client,sym,CurrencyType):
-    try:
-        candles = client.futures_continous_klines(pair=sym, interval=globalInterval,ContractType='PERPETUAL')
-        df = pd.DataFrame(candles)
-        df.columns = ['timestart', 'open', 'high', 'low', 'close', 'volume', 'timeend', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'unused_field']
-        df['timestart'] = df['timestart'] / 1000
-        df['timeend'] = df['timeend'] / 1000
-        df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']] = df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']].astype(float)
-        return df
-    except Exception as e:
-        #TokenInfo error Removed from Market or not added yet
-        print("TokenInfo error Removed from Market or not added yet",e)
-
-def FindNewToken(client,exInfo,excludedlist,CurrencyType):
+def FindNewToken(client,exInfo,CurrencyType):
     symInfo={}
     tokenInfo={}
     for symbol in exInfo["symbols"]:
-        if symbol["contractType"]=="PERPETUAL" and symbol["symbol"] not in excludedlist and CurrencyType in symbol["symbol"] and symbol["status"]=="TRADING":
+        if symbol["contractType"]=="PERPETUAL" and CurrencyType in symbol["symbol"] and symbol["status"]=="TRADING":
             symInfo[symbol["symbol"]]=symbol["quantityPrecision"]
     x=0
     for key,values in symInfo.items():
-        result=TokenInfo(client,key,CurrencyType)
-        tokenInfo[key]=result
-        if x==30:
-            print("30%")
-        if x==80:
-            print("55%")
-        if x==130:
-            print("69%")
-        x+=1           
+        try:
+            candles = client.futures_continous_klines(pair=key, interval=globalInterval,ContractType='PERPETUAL')
+            df = pd.DataFrame(candles)
+            df.columns = ['timestart', 'open', 'high', 'low', 'close', 'volume', 'timeend', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'unused_field']
+            df['timestart'] = df['timestart'] / 1000
+            df['timeend'] = df['timeend'] / 1000
+            df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']] = df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']].astype(float)
+            tokenInfo[key]=df
+            if x==30:
+                print("30%")
+            if x==80:
+                print("55%")
+            if x==130:
+                print("69%")
+            x+=1           
+        except Exception as e:
+            #TokenInfo error Removed from Market or not added yet
+            print("TokenInfo error Removed from Market or not added yet",key,e)
+            continue
     return tokenInfo,symInfo
 
-def OpenLayer(TokenInfo):
+def OpenLayer(excludedlist,TokenInfo):
     
-    ranked_result={}
-    for Ti,df in TokenInfo.items():
-        try:        
+    ranked_result = {}
+    print("90% Training and detecting")
+    
+    # First loop: Training
+    for Ti, df in TokenInfo.items():
+        try:
             cmf_series=CMF(df)
             rsi_series=rsi(df)
             macd_series=MACD(df)
-            # Combine the normalized and smoothed series
-            series = (cmf_series + rsi_series + macd_series) / 3
-            series=sequential_cumulative_sum(series)
-            #series = count_consecutive_values(series)
-            # Train the network
-            #neuralStuff.train_network(series)
-            # Train the model
-            # Preprocess the data
-            #train_ongoing_cluster_model(series)
-            # Train the model (this will update the model if it already exists)
-            train_and_process_large_magnitude(series)
-            train_and_process_small_magnitude(series)
-            # Train the model and save it
-            #train_ongoing_cluster_model(X, y)
-
-            #model_cont, model_next = train_gbdt(series, look_back=1, epochs=1000)
+            adx_series=ADX(df)
+            data = normalize((cmf_series + rsi_series + macd_series + adx_series) / 4)
+            smoothed_series = moving_average(data, window=14)     
+            areas = calculate_areas(smoothed_series)
+            # Check for NaN values in areas
+            if np.isnan(areas).any():
+                continue  # Skip this token and move to the next one
+            train_market(areas)
         except Exception as e:
-            #TokenInfo error Removed from Market or not added yet
-            print("Trainloop error",e)
+            print(f"TRAINMARKET error: {str(e)}")
             continue
-    print("90%")
-    for Ti,df in TokenInfo.items():
-        try:        
-            cmf_series=CMF(df)
-            rsi_series=rsi(df)
-            macd_series=MACD(df)
-            # Combine the normalized and smoothed series
-            series = (cmf_series + rsi_series + macd_series) / 3
-            series=sequential_cumulative_sum(series)
-            # train_and_process_large_magnitude(series)
-            # train_and_process_small_magnitude(series)
-            positive_prob, negative_prob = get_directional_probability(series)
-            pp=round(positive_prob,3)
-            pn=round(negative_prob,3)
-            #print(Ti,pp,pn)
-            if pp>pn:
-                ranked_result[Ti]=[pp,'FL']
-            if pn>pp:
-                ranked_result[Ti]=[pn,'FS']
+    global_confidence_values=[]
+    # Second loop: Prediction
+    for Ti, df in TokenInfo.items():
+        try:
+            if Ti not in excludedlist:
+                cmf_series=CMF(df)
+                rsi_series=rsi(df)
+                macd_series=MACD(df)
+                adx_series=ADX(df)
+                data = normalize((cmf_series + rsi_series + macd_series + adx_series) / 4)
+                smoothed_series = moving_average(data, window=14)     
+                areas = calculate_areas(smoothed_series)
+                if np.isnan(areas).any():
+                    continue  # Skip this token and move to the next one
+                confidence_score, direction = detect_and_predict(areas)
+                global_confidence_values.append(confidence_score)
+                if direction == 1:
+                    ranked_result[Ti] = [confidence_score, 'FL']
+                else:
+                    ranked_result[Ti] = [confidence_score, 'FS']  
         except Exception as e:
-            #TokenInfo error Removed from Market or not added yet
-            print("predictloop error",e)
-            continue   
+            print(f"predictloop error: {str(e)}")
+            continue
+
     # Sort the keys based on the first element of the list in descending order
-    sorted_keys = sorted(ranked_result.keys(), key=lambda x: ranked_result[x][0],reverse=True)
+    sorted_keys = sorted(ranked_result.keys(), key=lambda x: ranked_result[x][0], reverse=True)
     # Reorganize the dictionary using the sorted keys
     sorted_ranked_result = {key: ranked_result[key] for key in sorted_keys}
+    global_confidence_value=round(get_average_confidence(global_confidence_values),1)
     print("100%")
-    return sorted_ranked_result
+    return sorted_ranked_result,global_confidence_value
 
 #################### Get token info #########################
 
 ############# Indicators #############
+def CMF(df, period=14):
+    mf = ((df['close'] - df['low']) - (df['high'] - df['close'])) / (df['high'] - df['low'])
+    mfv = mf * df['volume']
+    cmf = mfv.rolling(period).sum() / df['volume'].rolling(period).sum()
+    # Forward fill and backward fill
+    cmf = cmf.ffill().bfill()
+    return cmf
 
-def CMF(data):
-    period = 20
-    mf = ((data['close'] - data['low']) - (data['high'] - data['close'])) / (data['high'] - data['low'])
-    mfv = mf * data['volume']
-    cmf_values = mfv.rolling(period).sum() / data['volume'].rolling(period).sum()
-    
-    # Initialize the full index
-    full_index = np.arange(len(data))
-    
-    # Fill NaN values using linear regression
-    original_series = cmf_values
-    filled_series = original_series.reindex(full_index)
-
-    # Indices of non-NaN values
-    not_nan_indices = np.where(~np.isnan(filled_series))[0]
-    # Indices of NaN values
-    nan_indices = np.where(np.isnan(filled_series))[0]
-
-    # Perform linear regression if there are NaN values
-    if len(nan_indices) > 0:
-        reg = LinearRegression()
-        if len(not_nan_indices) > 1:  # Only fit if there are enough points
-            reg.fit(not_nan_indices.reshape(-1, 1), filled_series.dropna().values)
-            # Predict NaN values
-            filled_series[nan_indices] = reg.predict(nan_indices.reshape(-1, 1))
-        
-        # If filled_series is still NaN at index 0, fill it with the first non-NaN value
-        if np.isnan(filled_series[0]):
-            filled_series[0] = filled_series.dropna().iloc[0]
-
-    normalized_series = 2 * (filled_series - filled_series.min()) / (filled_series.max() - filled_series.min()) - 1
-    return normalized_series
-
-
-def rsi(dataset, period=14):
-    # Calculate daily returns
-    delta = dataset['close'].diff()
-    
-    # Separate positive and negative gains/losses
+def rsi(df, period=14):
+    delta = df['close'].diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
-    
-    # Calculate average gain and loss
     avg_gain = gain.rolling(window=period, min_periods=1).mean()
     avg_loss = loss.rolling(window=period, min_periods=1).mean()
-    
-    # Calculate the Relative Strength (RS)
     rs = avg_gain / avg_loss
-    
-    # Calculate the RSI
     rsi = 100 - (100 / (1 + rs))
-    normalized_rsi = 2 * (rsi - 50) / 100
-    
-    # Fill NaN values using linear regression
-    original_series = normalized_rsi
-    full_index = np.arange(len(dataset))
-    filled_series = original_series.reindex(full_index)
+    # Forward fill and backward fill
+    rsi = rsi.ffill().bfill()
+    return rsi
 
-    # Indices of non-NaN values
-    not_nan_indices = np.where(~np.isnan(filled_series))[0]
-    # Indices of NaN values
-    nan_indices = np.where(np.isnan(filled_series))[0]
-
-    # Perform linear regression if there are NaN values
-    if len(nan_indices) > 0:
-        reg = LinearRegression()
-        if len(not_nan_indices) > 1:  # Only fit if there are enough points
-            reg.fit(not_nan_indices.reshape(-1, 1), filled_series.dropna().values)
-            # Predict NaN values
-            filled_series[nan_indices] = reg.predict(nan_indices.reshape(-1, 1))
-        
-        # If filled_series is still NaN at index 0, fill it with the first non-NaN value
-        if np.isnan(filled_series[0]):
-            filled_series[0] = filled_series.dropna().iloc[0]
-
-    normalized_series = 2 * (filled_series - filled_series.min()) / (filled_series.max() - filled_series.min()) - 1
-    return normalized_series
-
-def calculate_ema(series, period):
-    return series.ewm(span=period, adjust=False).mean()
-
-def MACD(dataset, short_period=12, long_period=26, signal_period=9):
-    # Calculate the short-term EMA (12-day EMA)
-    short_ema = calculate_ema(dataset['close'], short_period)
-    
-    # Calculate the long-term EMA (26-day EMA)
-    long_ema = calculate_ema(dataset['close'], long_period)
-    
-    # Calculate the MACD line
+def MACD(df, short_period=12, long_period=26, signal_period=9):
+    short_ema = df['close'].ewm(span=short_period, adjust=False).mean()
+    long_ema = df['close'].ewm(span=long_period, adjust=False).mean()
     macd_line = short_ema - long_ema
-    
-    # Calculate the Signal line (9-day EMA of the MACD line)
-    signal_line = calculate_ema(macd_line, signal_period)
-    
-    # Calculate the MACD Histogram
+    signal_line = macd_line.ewm(span=signal_period, adjust=False).mean()
     macd_histogram = macd_line - signal_line
+    # Forward fill and backward fill
+    macd_histogram = macd_histogram.ffill().bfill()
+    return macd_histogram
+
+def ADX(df, period=14):
+    high = df['high']
+    low = df['low']
+    close = df['close']
     
-    # Normalize the MACD Histogram to a range from -100 to 100
-    max_abs_histogram = macd_histogram.abs().max()
-    normalized_histogram = (macd_histogram / max_abs_histogram) * 100
+    plus_dm = high.diff()
+    minus_dm = low.diff()
     
-    # Fill NaN values using linear regression
-    original_series = normalized_histogram
-    full_index = np.arange(len(dataset))
-    filled_series = original_series.reindex(full_index)
-
-    # Indices of non-NaN values
-    not_nan_indices = np.where(~np.isnan(filled_series))[0]
-    # Indices of NaN values
-    nan_indices = np.where(np.isnan(filled_series))[0]
-
-    # Perform linear regression if there are NaN values
-    if len(nan_indices) > 0:
-        reg = LinearRegression()
-        if len(not_nan_indices) > 1:  # Only fit if there are enough points
-            reg.fit(not_nan_indices.reshape(-1, 1), filled_series.dropna().values)
-            # Predict NaN values
-            filled_series[nan_indices] = reg.predict(nan_indices.reshape(-1, 1))
-        
-        # If filled_series is still NaN at index 0, fill it with the first non-NaN value
-        if np.isnan(filled_series[0]):
-            filled_series[0] = filled_series.dropna().iloc[0]
-
-    normalized_series = 2 * (filled_series - filled_series.min()) / (filled_series.max() - filled_series.min()) - 1
-    return normalized_series
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0)
+    
+    tr = pd.concat([high - low, abs(high - close.shift()), abs(low - close.shift())], axis=1).max(axis=1)
+    atr = tr.rolling(window=period).mean()
+    
+    plus_di = 100 * (plus_dm.rolling(window=period).mean() / atr)
+    minus_di = 100 * (minus_dm.rolling(window=period).mean() / atr)
+    
+    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+    adx = dx.rolling(window=period).mean()
+    
+    # Forward fill and backward fill
+    adx = adx.ffill().bfill()
+    return adx
 
 def z_score(series):
     return (series - series.mean()) / series.std()
 
 def moving_average(series, window=14):
     return series.rolling(window=window, min_periods=1).mean()
+def calculate_areas(series):
+    areas = []
+    segment_start = 0
 
+    for i in range(1, len(series)):
+        if series.iloc[i] > series.iloc[i-1]:
+            # Rising segment
+            if segment_start != i - 1 and series.iloc[i-1] < series.iloc[segment_start]:
+                # If previous segment was falling, close it
+                segment = series.iloc[segment_start:i]
+                area = trapezoid(segment)
+                areas.append(round(-abs(area), 3))  # Negative area for falling segment, rounded to 3 decimal places
+                segment_start = i - 1
+
+        elif series.iloc[i] < series.iloc[i-1]:
+            # Falling segment
+            if segment_start != i - 1 and series.iloc[i-1] > series.iloc[segment_start]:
+                # If previous segment was rising, close it
+                segment = series.iloc[segment_start:i]
+                area = trapezoid(segment)
+                areas.append(round(area, 3))  # Positive area for rising segment, rounded to 3 decimal places
+                segment_start = i - 1
+
+    # Handle the last segment
+    if segment_start < len(series) - 1:
+        segment = series.iloc[segment_start:]
+        area = trapezoid(segment)
+        if series.iloc[-1] > series.iloc[segment_start]:
+            areas.append(round(area, 3))
+        else:
+            areas.append(round(-abs(area), 3))
+
+    return areas
+
+def normalize(series):
+    min_val = series.min()
+    max_val = series.max()
+    normalized_series = 2 * (series - min_val) / (max_val - min_val) - 1
+    return normalized_series
 def all_w_or_l(column_name, df):
     # Check if the column exists in the DataFrame
     if column_name not in df.columns:
@@ -618,7 +475,7 @@ def all_w_or_l(column_name, df):
     
 ############# Indicators #############    
 ########close/open trades########### add_tradeLog(Ti,datetime, opprice,result,amount,status,EXP)
-def Rtrade(bList,BotLimit,lvrg,tinfo,mode):
+def Rtrade(bList,BotLimit,lvrg,tinfo,mode,global_confidence):
     client = Client(api_key, api_secret)
     mrgType="ISOLATED"
     x=0
@@ -677,16 +534,15 @@ def Rtrade(bList,BotLimit,lvrg,tinfo,mode):
                 cmf_series=CMF(df)
                 rsi_series=rsi(df)
                 macd_series=MACD(df)
+                adx_series=ADX(df)
                 cprice = df['close'].iloc[-1]
-                # Combine the normalized and smoothed series
-                series = (cmf_series + rsi_series + macd_series) / 3
-                series=sequential_cumulative_sum(series)
-                # train_and_process_large_magnitude(series)
-                # train_and_process_small_magnitude(series)
-                positive_prob, negative_prob = get_directional_probability(series)
-                pp=round(positive_prob,3)
-                pn=round(negative_prob,3)
-                if status=='FS' and pp>pn:
+                data = normalize((cmf_series + rsi_series + macd_series + adx_series) / 4)
+                smoothed_series = moving_average(data, window=14)     
+                areas = calculate_areas(smoothed_series)
+                train_market(areas)
+                confidence_score, direction = detect_and_predict(areas)
+                #print(Ti,confidence_score,direction)
+                if status=='FS' and confidence_score>global_confidence and direction==1:
                     if oprice>cprice:
                         if mode=='R':
                             closeShort(client,amount,Ti)
@@ -699,7 +555,7 @@ def Rtrade(bList,BotLimit,lvrg,tinfo,mode):
                         update_cell_Tlog(Ti, 'result', 'L')
                         print("trade closed : ", Ti,oprice,cprice, 'L')
                         break        
-                if status=='FL' and pn>pp:
+                if status=='FL' and confidence_score>global_confidence and direction==0:
                     if oprice<cprice:
                         if mode=='R':
                             closeLong(client,amount,Ti)
@@ -716,7 +572,7 @@ def Rtrade(bList,BotLimit,lvrg,tinfo,mode):
         if all_w_or_l('result', TLog):
             print("All Trades Done")
             return True
-        sleep(900)
+        sleep(300)
     print("All Trades Done")
     return True
 ########trainer############
@@ -738,10 +594,12 @@ def MAIN_TRADER(excludedlist,CurrencyType,BotLimit,lvrg,initial,mode):
             BotLimit=8
         if bal > 900:
             BotLimit=10
-        TokenList,tinfo = batchCollector(excludedlist,CurrencyType)
+        TokenList,tinfo,global_confidence = batchCollector(excludedlist,CurrencyType)
         print('tokens found:',len(TokenList))
+        print('global confidence:',global_confidence)
+        #break
         if len(TokenList)>0:
-            Rtrade(TokenList,BotLimit,lvrg,tinfo,mode)
+            Rtrade(TokenList,BotLimit,lvrg,tinfo,mode,global_confidence)
         clear_tradeLog()
         print("sleeping waiting for next cycle")
 clear_tradeLog()
