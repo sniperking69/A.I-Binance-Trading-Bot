@@ -14,12 +14,13 @@ from time import sleep
 from binance.client import Client
 from binance import *
 from binance.enums import *
-from sklearn.neural_network import MLPRegressor, MLPClassifier
-from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LinearRegression
-import joblib
 import os
-from scipy.integrate import trapezoid
+import pickle
+import random
+import joblib
+from sklearn.preprocessing import StandardScaler
+from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import MinMaxScaler
 globalInterval=Client.KLINE_INTERVAL_15MINUTE
 ########close/open trades###########
 def Lsafe(client,Seed,mrgType,lvrg):
@@ -38,6 +39,7 @@ def truncate(number, precision):
     factor = 10.0 ** precision
     return int(number * factor) / factor
 
+
 def LongOrder(client, Seed, precision, numBots, lvrg):
     balance = client.futures_account_balance()
     bal = None
@@ -49,7 +51,8 @@ def LongOrder(client, Seed, precision, numBots, lvrg):
 
     if bal is None:
         return "No USDT balance found"
-
+    if bal >= 1000:
+        bal = 1000
     percent = 0.9 / numBots  # Calculate the percentage of balance to use for each bot
 
     price = float(client.futures_mark_price(symbol=Seed)["markPrice"])
@@ -63,10 +66,9 @@ def LongOrder(client, Seed, precision, numBots, lvrg):
             return str(q)
         else:
             return 'null'
-    except Exception as e:
-        print("ShortOrder",e)
-        return 'null'
-    
+    except:
+        return "null"
+
 def ShortOrder(client, Seed, precision, numBots, lvrg):
     balance = client.futures_account_balance()
     bal = None
@@ -92,10 +94,8 @@ def ShortOrder(client, Seed, precision, numBots, lvrg):
             return str(q)
         else:
             return 'null'
-    except Exception as e:
-        print("ShortOrder",e)
-        return 'null'
-        
+    except:
+        return "null"
 
 def closeLong(client, p, Seed):
     try:
@@ -110,164 +110,304 @@ def closeShort(client, p, Seed):
         return f"Closed short position with quantity {p}"
     except:
         return 'null'
-    
-def TradeLog():
-    if not os.path.exists('TradeLog.csv'):
-        # Create a DataFrame with the desired structure
-        data = {
-            'token': [],
-            'datetime': [],
-            'opprice': [],
-            'result':[],
-            'status': []
-        }
-        df = pd.DataFrame(data)
-        df.to_csv('TradeLog.csv', index=False)
-        return df
-    else:
-        df=pd.read_csv('TradeLog.csv')
-        return df
 
-def clear_tradeLog():
-    try:
-        os.remove("TradeLog.csv")
-        print(" TradeLog.csv deleted successfully.")
-    except FileNotFoundError:
-        print("File TradeLog.csv not found.")
-        pass
-    except Exception as e:
-        print(f"An error occurred: {e}")
+##########################preceptron###################################
 
-def add_tradeLog(Ti,datetime, opprice,result,amount,status):
-    dataframe=TradeLog()
-    new_row = pd.DataFrame({
-        'token': Ti,
-        'datetime': datetime,
-        'opprice': opprice,
-        'amount': amount,
-        'result': result,
-        'status': status
-    }, index=[0])  # Ensure it's a single row DataFrame
-    
-    dataframe = pd.concat([dataframe, new_row], ignore_index=True)
-    dataframe.to_csv('TradeLog.csv', index=False)
-    
-def update_cell_Tlog(token, column_name, new_value):
-    df=TradeLog()
-    row_index = df.index[df['token'] == token ].tolist()
-    if not row_index:
-        print(f"Indicator '{token}' not found.")
-        return
-    column_index = df.columns.get_loc(column_name)
-    df.iloc[row_index[0], column_index] = new_value
-    df.to_csv('TradeLog.csv', index=False)
-    return True
+# Function to train the market models incrementally for high movement detection
+def train_market(areas, model_file="models/high_movement_model.pkl"):
+    # Initialize the classifier for detecting high movement
+    mlp_classifier = MLPClassifier(hidden_layer_sizes=(100,), max_iter=500, warm_start=True)
 
-def read_matching_TLog(token, column_name):
-    df=TradeLog()
-    row_index = df.index[df['token'] == token].tolist()
-    if not row_index:
-        print(f"Indicator '{token}' not found.")
-        return
-    column_index = df.columns.get_loc(column_name)
-    cell_value = df.iloc[row_index[0], column_index]
-    return cell_value
+    # Initialize a scaler for the input data
+    scaler = StandardScaler()
 
-#############################################################
-# Initialize models
-mlp_classifier = MLPClassifier(hidden_layer_sizes=(100,), max_iter=500, warm_start=True)
-mlp_predictor = MLPClassifier(hidden_layer_sizes=(100,), max_iter=500, warm_start=True)
-
-# Initialize a scaler for the input data
-scaler = StandardScaler()
-
-# Initialize memory to hold the training data
-memory = {
-    'X': [],
-    'y_detection': [],
-    'y_prediction': []
-}
-
-def train_market(areas, significant_threshold=1.0, model_file="models/market_model.pkl"):
     # Create the directory if it does not exist
     os.makedirs(os.path.dirname(model_file), exist_ok=True)
 
-    # Preprocess the data
-    X = np.array(areas).reshape(-1, 1)  # Input features
+    # Use signed magnitudes (positive or negative areas) to preserve direction
+    X = np.array([area for area in areas]).reshape(-1, 1)  # Input features with signed magnitudes
     X_scaled = scaler.fit_transform(X)
 
-    # Prepare labels for detection (whether the last area is large or not)
-    y_detection = np.array([1 if abs(area) >= significant_threshold else 0 for area in areas])
-    
-    # Prepare labels for prediction (whether the current curve will become large)
-    y_prediction = np.roll(y_detection, -1)  # Shift the detection labels to align with the current curve
-    y_prediction[-1] = 0  # No prediction for the last area, but this won't affect training
+    # Dynamically calculate the significant threshold as the mean of the absolute magnitudes
+    significant_threshold = np.mean(np.abs(areas))
 
-    # Store the data for incremental learning
-    memory['X'].append(X_scaled)
-    memory['y_detection'].append(y_detection)
-    memory['y_prediction'].append(y_prediction)
+    # Prepare labels for detection:
+    # Label as high movement (1) if area is larger than the threshold and moving away from zero, otherwise low (0)
+    y_detection = np.array([1 if abs(area) > significant_threshold else 0 for area in areas])
 
-    # Convert lists to arrays
-    X_memory = np.vstack(memory['X'])
-    y_detection_memory = np.concatenate(memory['y_detection'])
-    y_prediction_memory = np.concatenate(memory['y_prediction'])
+    # Ensure both X and y are of the same length
+    if len(X_scaled) != len(y_detection):
+        print("Length mismatch between input and labels.")
+        return
 
-    # Incremental fit to the models
-    mlp_classifier.partial_fit(X_memory, y_detection_memory, classes=[0, 1])
-    mlp_predictor.partial_fit(X_memory, y_prediction_memory, classes=[0, 1])
+    # Check for sufficient data
+    if len(X_scaled) < 2:
+        print("Not enough data to train.")
+        return
 
-    # Save the models
-    joblib.dump((mlp_classifier, mlp_predictor, scaler), model_file)
+    # Check for NaNs
+    if np.isnan(X_scaled).any() or np.isnan(y_detection).any():
+        print("Data contains NaN values. Skipping this batch.")
+        return
 
-def detect_and_predict(areas, model_file="models/market_model.pkl"):
-    # Load the models
-    mlp_classifier, mlp_predictor, scaler = joblib.load(model_file)
+    # Load existing model and scaler if they exist
+    if os.path.exists(model_file):
+        mlp_classifier, scaler = joblib.load(model_file)
 
-    # Prepare the data
-    X = np.array(areas).reshape(-1, 1)
+    # Ensure all classes are present in the current batch for detection
+    unique_classes_detection = np.unique(y_detection)
+    if len(unique_classes_detection) == 1:  # Only one class present
+        missing_class = 1 - unique_classes_detection[0]  # Find the missing class
+        dummy_feature = np.mean(X_scaled)  # Use the mean of scaled features as a dummy feature
+        X_scaled = np.insert(X_scaled, 0, [dummy_feature], axis=0)
+        y_detection = np.insert(y_detection, 0, missing_class)
 
-    # Scale the data
+    # Incremental fit to the model for detection
+    mlp_classifier.partial_fit(X_scaled, y_detection, classes=[0, 1])
+
+    # Save the model
+    joblib.dump((mlp_classifier, scaler), model_file)
+
+
+# Function to detect high movement probability using the trained model
+def detect_high_movement(areas, model_file="models/high_movement_model.pkl"):
+    # Load the model and scaler
+    mlp_classifier, scaler = joblib.load(model_file)
+
+    # Use signed magnitudes for detecting movement
+    X = np.array([area for area in areas]).reshape(-1, 1)
     X_scaled = scaler.transform(X)
 
-    # Detection: Probability that the last area is large
+    # Detection: Probability that the last area indicates high movement away from zero
     last_area = X_scaled[-1].reshape(1, -1)
     detection_proba = mlp_classifier.predict_proba(last_area)[0, 1]
 
-    # Prediction: Probability that the current curve will become large
-    prediction_proba = mlp_predictor.predict_proba(last_area)[0, 1]
+    # Return the probability of high movement
+    return detection_proba
 
-    # Subtract detection_proba from prediction_proba to form the confidence score
-    combined_confidence = prediction_proba - detection_proba
 
-    # Ensure the confidence score is within a reasonable range [0, 1] after subtraction
-    combined_confidence = max(min(combined_confidence, 1), 0)
+##########################################DEEP Q######################################################
+# Define the file path for the Q-table
+q_table_file = 'models/q_table.pkl'
 
-    # Calculate the slope between the last two areas
-    if len(areas) > 1:
-        slope = areas[-1] - areas[-2]
-        
-        # If the slope is negative (indicating a peak), reduce confidence
-        if slope < 0:
-            reduction_factor = 1 + (abs(slope) / max(abs(areas[-2]), 1e-6))  # Dynamic reduction based on slope
-            combined_confidence /= reduction_factor
+# Load Q-table from memory or initialize if not present
+def load_q_table():
+    if os.path.exists(q_table_file):
+        with open(q_table_file, 'rb') as f:
+            q_table = pickle.load(f)
+        print("Loaded Q-table from file.")
+    else:
+        q_table = {}
+        # Initialize only valid state-action pairs
+        q_table.update({('not_holding', action): 0 for action in ['entry_long', 'entry_short', 'not_holding']})
+        q_table.update({('hold_long', action): 0 for action in ['hold_long', 'exit_long']})
+        q_table.update({('hold_short', action): 0 for action in ['hold_short', 'exit_short']})
+    return q_table
 
-    # **New Addition: Volatility Check**
-    if len(areas) > 3:
-        volatility = np.std(areas[-4:])
-        if volatility < 0.1:  # Adjust this threshold based on your data
-            combined_confidence *= 0.5  # Reduce confidence in low volatility conditions
+# Save Q-table to memory
+def save_q_table(q_table):
+    with open(q_table_file, 'wb') as f:
+        pickle.dump(q_table, f)
+    #print("Q-table saved to file.")
+
+# Initialize or load the Q-table
+q_table = load_q_table()
+
+# Hyperparameters
+epsilon = 0.9  # Start with a higher exploration rate to encourage exploration
+epsilon_decay = 0.9995  # Use a more gradual decay to reduce exploration slowly
+epsilon_min = 0.1  # Higher minimum exploration rate to maintain some exploration
+alpha = 0.1  # Learning rate
+gamma = 0.8  # Discount factor
+
+# Updated reward function to calculate profit as a percentage and penalize large losses
+def reward(state, action, entry_price, exit_price):
+    global q_table
+
+    # Calculate profit or loss as a percentage
+    if action == 'exit_long':
+        realized_profit_percentage = ((exit_price - entry_price) / entry_price) * 100  # Percentage profit for long
+        if realized_profit_percentage < 0:
+            # Penalize the loss in long position more aggressively
+            realized_profit_percentage *= 2  # Double penalty for negative trades
+            # Reward the opposite (short) action for learning
+            if (state, 'entry_short') in q_table:
+                q_table[(state, 'entry_short')] += abs(realized_profit_percentage)  # Positive reward for short
     
-    # Scale the confidence score to a range of 0 to 10
-    confidence_score = round(combined_confidence * 10, 1)
+    elif action == 'exit_short':
+        realized_profit_percentage = ((entry_price - exit_price) / entry_price) * 100  # Percentage profit for short
+        if realized_profit_percentage < 0:
+            # Penalize the loss in short position more aggressively
+            realized_profit_percentage *= 2  # Double penalty for negative trades
+            # Reward the opposite (long) action for learning
+            if (state, 'entry_long') in q_table:
+                q_table[(state, 'entry_long')] += abs(realized_profit_percentage)  # Positive reward for long
+    
+    else:
+        return  # No reward update during entry or holding
 
-    # Determine direction from the last element in areas
-    direction = 1 if areas[-1] > 0 else 0
+    # Adjust reward based on profit percentage
+    reward_value = realized_profit_percentage
 
-    return confidence_score, direction
+    # Update the Q-value for the current state-action pair
+    if (state, action) in q_table:
+        old_value = q_table[(state, action)]
+        next_state = 'not_holding'
 
-def get_average_confidence(global_confidence_values):
-    return sum(global_confidence_values) / len(global_confidence_values) if global_confidence_values else 0
+        # Only consider valid next states for max Q-value calculation
+        valid_next_actions = ['entry_long', 'entry_short', 'not_holding']
+        next_max = max(q_table.get((next_state, a), 0) for a in valid_next_actions)
+
+        # Update Q-value using the Q-learning formula
+        new_value = old_value + alpha * (reward_value + gamma * next_max - old_value)
+        q_table[(state, action)] = new_value
+
+
+# Adjust the get_action function to favor learning from profitable trades
+def get_action(state, area, trend_direction, high_movement_proba):
+    global q_table
+
+    # Define valid actions based on the current state
+    if state == 'not_holding':
+        valid_actions = ['entry_long', 'entry_short', 'not_holding']
+    elif state == 'hold_long':
+        valid_actions = ['hold_long', 'exit_long']
+    elif state == 'hold_short':
+        valid_actions = ['hold_short', 'exit_short']
+    else:
+        valid_actions = ['not_holding']
+
+    # Exploration vs Exploitation
+    if random.uniform(0, 1) < epsilon:
+        chosen_action = random.choice(valid_actions)  # Random action from valid actions only
+        return chosen_action
+
+    # Compute Q-values for valid actions only
+    q_values = np.array([q_table.get((state, action), 0) for action in valid_actions])
+
+    # Use the trend direction and high movement probability to influence the decision
+    if state == 'not_holding':
+        # If uptrend and high movement probability, favor 'entry_long'
+        if trend_direction == 1 and high_movement_proba > 0.3:
+            q_values[valid_actions.index('entry_long')] += 0.1  # Increase the score
+        
+        # If downtrend and high movement probability, favor 'entry_short'
+        elif trend_direction == -1 and high_movement_proba > 0.3:
+            q_values[valid_actions.index('entry_short')] += 0.1
+
+    elif state == 'hold_long' and trend_direction == 1 and high_movement_proba < 0.2:
+        # Favor holding onto winning long positions
+        q_values[valid_actions.index('hold_long')] += 0.1
+
+    elif state == 'hold_short' and trend_direction == -1 and high_movement_proba < 0.2:
+        # Favor holding onto winning short positions
+        q_values[valid_actions.index('hold_short')] += 0.1
+
+    # Select the action with the highest Q-value among valid actions
+    chosen_action = valid_actions[np.argmax(q_values)]
+    return chosen_action
+
+
+# RL_train function to track total profit as a percentage and adjust rewards for learning from losses
+def RL_train(df):
+    global q_table, epsilon
+
+    num_episodes = 0
+    wins = 0
+    losses = 0
+    win_rate = 100
+    max_episodes = 10
+    win_rate_history = []
+    
+    total_profit_percentage = 0  # Initialize total profit percentage
+
+    # Prepare the features for training: normalized areas and trend
+    areas, trend_direction = prepare_features(df)
+
+    # Train the model for high-movement detection
+    train_market(areas)
+
+    while True:
+        state = 'not_holding'
+        entry_price = None
+
+        for i in range(1, len(df)):
+            current_price = df['close'].iloc[i]  # Get the current price
+            area = areas.iloc[i]  # Get the moving average value
+            trend_value = trend_direction.iloc[i]  # Get the trend direction (1 for uptrend, -1 for downtrend)
+
+            # Pass the array/slice of areas up to index `i`
+            high_movement_proba = detect_high_movement(areas[:i+1])  # Check the probability for high movement
+
+            # Get the action based on the current state, moving average, trend, and high movement probability
+            action = get_action(state, area, trend_value, high_movement_proba)
+
+            # Process the action and update the state
+            if state == 'not_holding' and action in ['entry_long', 'entry_short']:
+                entry_price = current_price
+                state = 'hold_long' if action == 'entry_long' else 'hold_short'
+
+            elif state == 'hold_long' and action == 'exit_long':
+                exit_price = current_price
+                realized_profit_percentage = ((exit_price - entry_price) / entry_price) * 100  # Profit percentage for long
+                total_profit_percentage += realized_profit_percentage  # Add to total percentage profit
+                reward(state, action, entry_price, exit_price)  # Update reward
+                state = 'not_holding'
+                entry_price = None
+
+            elif state == 'hold_short' and action == 'exit_short':
+                exit_price = current_price
+                realized_profit_percentage = ((entry_price - exit_price) / entry_price) * 100  # Profit percentage for short
+                total_profit_percentage += realized_profit_percentage  # Add to total percentage profit
+                reward(state, action, entry_price, exit_price)  # Update reward
+                state = 'not_holding'
+                entry_price = None
+
+        # Force-close any open trades at the end of the dataset
+        if state == 'hold_long':
+            exit_price = df['close'].iloc[-1]
+            realized_profit_percentage = ((exit_price - entry_price) / entry_price) * 100  # Calculate percentage profit
+            total_profit_percentage += realized_profit_percentage  # Add to total percentage profit
+            reward(state, 'exit_long', entry_price, exit_price)  # Force close the long trade
+            if exit_price > entry_price:
+                wins += 1
+            else:
+                losses += 1
+
+        elif state == 'hold_short':
+            exit_price = df['close'].iloc[-1]
+            realized_profit_percentage = ((entry_price - exit_price) / entry_price) * 100  # Calculate percentage profit
+            total_profit_percentage += realized_profit_percentage  # Add to total percentage profit
+            reward(state, 'exit_short', entry_price, exit_price)  # Force close the short trade
+            if exit_price < entry_price:
+                wins += 1
+            else:
+                losses += 1
+
+        # Increment episode counter
+        num_episodes += 1
+
+        # Calculate win rate and check for stopping condition
+        if wins + losses > 0:
+            win_rate = (wins / (wins + losses)) * 100
+            win_rate_history.append(win_rate)
+
+        # Check if maximum number of episodes has been reached
+        if num_episodes >= max_episodes:
+            break
+
+        # Decay epsilon for exploration-exploitation balance
+        if epsilon > epsilon_min:
+            epsilon *= epsilon_decay
+
+    # Save Q-table after training
+    save_q_table(q_table)
+
+    # Return the win rate and total profit percentage
+    return win_rate, total_profit_percentage  # Return win rate and profit percentage
+
+
+
 
 #################### Get token info #########################
 
@@ -275,8 +415,8 @@ def batchCollector(excludedlist,CurrencyType):
     client = Client(api_key, api_secret)
     exInfo=client.futures_exchange_info()
     tokenInf,sinf=FindNewToken(client,exInfo,CurrencyType)
-    Ftoken_list,global_confidence=OpenLayer(excludedlist,tokenInf)
-    return Ftoken_list,sinf,global_confidence
+    Ftoken_list=OpenLayer(excludedlist,tokenInf)
+    return Ftoken_list,sinf
 
 def FindNewToken(client,exInfo,CurrencyType):
     symInfo={}
@@ -295,11 +435,7 @@ def FindNewToken(client,exInfo,CurrencyType):
             df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']] = df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']].astype(float)
             tokenInfo[key]=df
             if x==30:
-                print("30%")
-            if x==80:
-                print("55%")
-            if x==130:
-                print("69%")
+                print("Token Search Started...")
             x+=1           
         except Exception as e:
             #TokenInfo error Removed from Market or not added yet
@@ -307,72 +443,103 @@ def FindNewToken(client,exInfo,CurrencyType):
             continue
     return tokenInfo,symInfo
 
-def OpenLayer(excludedlist,TokenInfo):
-    
+def OpenLayer(excludedlist, TokenInfo): 
     ranked_result = {}
-    print("90% Training and detecting")
-    
-    # First loop: Training
+    winratecoll = {}
+    print("Training and detecting")
+
+    # Training Loop
     for Ti, df in TokenInfo.items():
         try:
-            cmf_series=CMF(df)
-            rsi_series=rsi(df)
-            macd_series=MACD(df)
-            adx_series=ADX(df)
-            data = normalize((cmf_series + rsi_series + macd_series + adx_series) / 4)
-            smoothed_series = moving_average(data, window=14)     
-            areas = calculate_areas(smoothed_series)
-            # Check for NaN values in areas
-            if np.isnan(areas).any():
-                continue  # Skip this token and move to the next one
-            train_market(areas)
+            win_rate, total_profit = RL_train(df)   
+            winratecoll[Ti] = [round(win_rate,3),round(total_profit,3)]
+            
+            print(Ti,round(win_rate,3), round(total_profit,3))
         except Exception as e:
-            print(f"TRAINMARKET error: {str(e)}")
+            print(f"RL: {str(e)}")  # Keep this for debugging
             continue
-    global_confidence_values=[]
-    # Second loop: Prediction
+
+    # Prediction Loop
     for Ti, df in TokenInfo.items():
         try:
             if Ti not in excludedlist:
-                cmf_series=CMF(df)
-                rsi_series=rsi(df)
-                macd_series=MACD(df)
-                adx_series=ADX(df)
-                data = normalize((cmf_series + rsi_series + macd_series + adx_series) / 4)
-                smoothed_series = moving_average(data, window=14)     
-                areas = calculate_areas(smoothed_series)
-                if np.isnan(areas).any():
-                    continue  # Skip this token and move to the next one
-                confidence_score, direction = detect_and_predict(areas)
-                global_confidence_values.append(confidence_score)
-                if direction == 1:
-                    ranked_result[Ti] = [confidence_score, 'FL']
-                else:
-                    ranked_result[Ti] = [confidence_score, 'FS']  
+                areas, trend_direction = prepare_features(df)
+                area = areas.iloc[-1]  # Get the moving average value
+                trend_value = trend_direction.iloc[-1]  # Get the trend direction (1 for uptrend, -1 for downtrend)
+                high_movement_proba = detect_high_movement(areas)  # Check the probability for high movement
+                if Ti in winratecoll and winratecoll[Ti][0]>0 and winratecoll[Ti][1]>0:
+                    action = get_action('not_holding',  area, trend_value, high_movement_proba)
+                    if action == 'entry_long':
+                        ranked_result[Ti] = [winratecoll[Ti][1], 'FL']
+                    elif action == 'entry_short':
+                        ranked_result[Ti] = [winratecoll[Ti][1], 'FS']
         except Exception as e:
-            print(f"predictloop error: {str(e)}")
+            print(f"predictloop error: {str(e)}")  # Keep this for debugging
             continue
 
     # Sort the keys based on the first element of the list in descending order
     sorted_keys = sorted(ranked_result.keys(), key=lambda x: ranked_result[x][0], reverse=True)
-    # Reorganize the dictionary using the sorted keys
     sorted_ranked_result = {key: ranked_result[key] for key in sorted_keys}
-    global_confidence_value=round(get_average_confidence(global_confidence_values),1)
-    print("100%")
-    return sorted_ranked_result,global_confidence_value
-
+    
+    return sorted_ranked_result
 #################### Get token info #########################
 
 ############# Indicators #############
-def CMF(df, period=14):
-    mf = ((df['close'] - df['low']) - (df['high'] - df['close'])) / (df['high'] - df['low'])
-    mfv = mf * df['volume']
-    cmf = mfv.rolling(period).sum() / df['volume'].rolling(period).sum()
-    # Forward fill and backward fill
-    cmf = cmf.ffill().bfill()
-    return cmf
+def handle_nans(series, method='drop'):
+    if method == 'drop':
+        return series.dropna()
+    elif method == 'zero_fill':
+        return series.fillna(0)
+    elif method == 'mean_fill':
+        return series.fillna(series.mean())
+    else:
+        raise ValueError("Invalid method specified for NaN handling.")
 
-def rsi(df, period=14):
+def calculate_atr(df, period=10):
+    """Calculate Average True Range (ATR) for a given period."""
+    high_low = df['high'] - df['low']
+    high_close = np.abs(df['high'] - df['close'].shift())
+    low_close = np.abs(df['low'] - df['close'].shift())
+    
+    tr = high_low.combine(high_close, max).combine(low_close, max)
+    atr = tr.rolling(window=period, min_periods=1).mean()
+    
+    return atr
+
+def superTrend(df, period=10, multiplier=3):
+    """Calculate Supertrend indicator and return direction (1 for uptrend, -1 for downtrend)."""
+    atr = calculate_atr(df, period)
+    
+    # Calculate the basic upper and lower bands
+    hl2 = (df['high'] + df['low']) / 2
+    upper_band = hl2 + (multiplier * atr)
+    lower_band = hl2 - (multiplier * atr)
+    
+    # Initialize Supertrend and direction columns
+    supertrend = pd.Series(index=df.index)
+    direction = pd.Series(index=df.index, dtype=int)
+    
+    # Initialize first values
+    supertrend.iloc[0] = lower_band.iloc[0]
+    direction.iloc[0] = 1
+    
+    for i in range(1, len(df)):
+        # Update Supertrend based on previous trend direction
+        if direction.iloc[i-1] == 1:  # Uptrend
+            supertrend.iloc[i] = max(lower_band.iloc[i], supertrend.iloc[i-1]) if df['close'].iloc[i] > lower_band.iloc[i] else upper_band.iloc[i]
+            direction.iloc[i] = 1 if df['close'].iloc[i] > supertrend.iloc[i] else -1
+        else:  # Downtrend
+            supertrend.iloc[i] = min(upper_band.iloc[i], supertrend.iloc[i-1]) if df['close'].iloc[i] < upper_band.iloc[i] else lower_band.iloc[i]
+            direction.iloc[i] = -1 if df['close'].iloc[i] < supertrend.iloc[i] else 1
+    
+    return direction
+
+def moving_average(series, window=14):
+    return series.rolling(window=window, min_periods=1).mean()
+
+# Helper Functions to Calculate Indicators
+
+def RSI_Normalized(df, period=14):
     delta = df['close'].diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
@@ -380,212 +547,200 @@ def rsi(df, period=14):
     avg_loss = loss.rolling(window=period, min_periods=1).mean()
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
-    # Forward fill and backward fill
-    rsi = rsi.ffill().bfill()
-    return rsi
 
-def MACD(df, short_period=12, long_period=26, signal_period=9):
+    rsi_normalized = (rsi - 50) / 50
+    rsi_normalized = rsi_normalized.clip(-1, 1)
+
+    rsi_normalized = handle_nans(rsi_normalized, method='mean_fill')
+    
+    return rsi_normalized
+
+def MACD_Normalized(df, short_period=12, long_period=26, signal_period=9):
     short_ema = df['close'].ewm(span=short_period, adjust=False).mean()
     long_ema = df['close'].ewm(span=long_period, adjust=False).mean()
     macd_line = short_ema - long_ema
     signal_line = macd_line.ewm(span=signal_period, adjust=False).mean()
     macd_histogram = macd_line - signal_line
-    # Forward fill and backward fill
-    macd_histogram = macd_histogram.ffill().bfill()
-    return macd_histogram
-
-def ADX(df, period=14):
-    high = df['high']
-    low = df['low']
-    close = df['close']
     
-    plus_dm = high.diff()
-    minus_dm = low.diff()
+    macd_min = macd_histogram.min()
+    macd_max = macd_histogram.max()
+    macd_normalized = 2 * (macd_histogram - macd_min) / (macd_max - macd_min) - 1
+    macd_normalized = macd_normalized.clip(-1, 1)
+
+    macd_normalized = handle_nans(macd_normalized, method='mean_fill')
     
-    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0)
-    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0)
+    return macd_normalized
+
+
+def CMF_Normalized(df, period=20):
+    mf = ((df['close'] - df['low']) - (df['high'] - df['close'])) / (df['high'] - df['low'])
+    mfv = mf * df['volume']
+    cmf = mfv.rolling(period).sum() / df['volume'].rolling(period).sum()
+
+    cmf_min = cmf.min()
+    cmf_max = cmf.max()
+    cmf_normalized = 2 * (cmf - cmf_min) / (cmf_max - cmf_min) - 1
+    cmf_normalized = cmf_normalized.clip(-1, 1)
+
+    cmf_normalized = handle_nans(cmf_normalized, method='mean_fill')
     
-    tr = pd.concat([high - low, abs(high - close.shift()), abs(low - close.shift())], axis=1).max(axis=1)
-    atr = tr.rolling(window=period).mean()
-    
-    plus_di = 100 * (plus_dm.rolling(window=period).mean() / atr)
-    minus_di = 100 * (minus_dm.rolling(window=period).mean() / atr)
-    
-    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
-    adx = dx.rolling(window=period).mean()
-    
-    # Forward fill and backward fill
-    adx = adx.ffill().bfill()
-    return adx
+    return cmf_normalized
 
-def z_score(series):
-    return (series - series.mean()) / series.std()
 
-def moving_average(series, window=14):
-    return series.rolling(window=window, min_periods=1).mean()
-def calculate_areas(series):
-    areas = []
-    segment_start = 0
-
-    for i in range(1, len(series)):
-        if series.iloc[i] > series.iloc[i-1]:
-            # Rising segment
-            if segment_start != i - 1 and series.iloc[i-1] < series.iloc[segment_start]:
-                # If previous segment was falling, close it
-                segment = series.iloc[segment_start:i]
-                area = trapezoid(segment)
-                areas.append(round(-abs(area), 3))  # Negative area for falling segment, rounded to 3 decimal places
-                segment_start = i - 1
-
-        elif series.iloc[i] < series.iloc[i-1]:
-            # Falling segment
-            if segment_start != i - 1 and series.iloc[i-1] > series.iloc[segment_start]:
-                # If previous segment was rising, close it
-                segment = series.iloc[segment_start:i]
-                area = trapezoid(segment)
-                areas.append(round(area, 3))  # Positive area for rising segment, rounded to 3 decimal places
-                segment_start = i - 1
-
-    # Handle the last segment
-    if segment_start < len(series) - 1:
-        segment = series.iloc[segment_start:]
-        area = trapezoid(segment)
-        if series.iloc[-1] > series.iloc[segment_start]:
-            areas.append(round(area, 3))
-        else:
-            areas.append(round(-abs(area), 3))
-
+def calculate_moving_avg_areas(moving_avg_data, window_size=5):
+    # Calculate areas based on moving averages using a rolling window
+    areas = moving_avg_data.diff().rolling(window=window_size).apply(lambda x: np.trapz(x, dx=1), raw=True)
+    areas = handle_nans(areas, method='mean_fill')  # Fill missing areas with zero or other appropriate value
     return areas
 
-def normalize(series):
-    min_val = series.min()
-    max_val = series.max()
-    normalized_series = 2 * (series - min_val) / (max_val - min_val) - 1
-    return normalized_series
-def all_w_or_l(column_name, df):
-    # Check if the column exists in the DataFrame
-    if column_name not in df.columns:
-        raise ValueError(f"Column '{column_name}' does not exist in the DataFrame.")
+def prepare_features(data):
+    df = data.copy()  # Work on a copy to avoid modifying the original DataFrame
     
-    # Check if all values in the column are either 'W' or 'L'
-    if (df[column_name].isin(['W', 'L'])).all():
-        return True
-    else:
-        return False
+    # Calculate trend and indicators
+    Trend = superTrend(df)
+    RSI = RSI_Normalized(df)
+    MACD = MACD_Normalized(df)
+    CMF = CMF_Normalized(df)
     
-############# Indicators #############    
-########close/open trades########### add_tradeLog(Ti,datetime, opprice,result,amount,status,EXP)
-def Rtrade(bList,BotLimit,lvrg,tinfo,mode,global_confidence):
+    # Combine normalized indicators
+    data = (RSI + MACD + CMF) / 3
+    
+    # Calculate moving average areas from combined indicators
+    areas = calculate_moving_avg_areas(data) * 100  # Multiplying for better scaling
+    areas = moving_average(areas, window=20)  # Apply smoothing on the areas
+
+    # Calculate the rate of change (velocity) of the area to track sudden shifts
+    area_velocity = np.gradient(areas)  # This gives the rate of change of the areas
+
+    # Normalize the close price between -1 and 1
+    scaler = MinMaxScaler(feature_range=(-1, 1))  # Set range from -1 to 1
+    normalized_close_price = scaler.fit_transform(df['close'].values.reshape(-1, 1)).flatten()  # Normalize
+    
+    # Combine the normalized close price with the areas and velocity (by averaging)
+    combined_features = (areas + normalized_close_price + area_velocity) / 3  # Average the areas, close price, and velocity
+
+    return combined_features, Trend  # Return the combined features and trend
+########crazy NewWave############
+def newwave_Trader(TokenList,tinfo,CurrencyType,BotLimit,lvrg,mode,avoidlist):
     client = Client(api_key, api_secret)
     mrgType="ISOLATED"
-    x=0
-    for Ti,ttype in bList.items():
-        Lsafe(client, Ti, mrgType, lvrg)
-        candles = client.futures_continous_klines(pair=Ti, interval=globalInterval,ContractType='PERPETUAL')
-        df = pd.DataFrame(candles)
-        df.columns = ['timestart', 'open', 'high', 'low', 'close', 'volume', 'timeend', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'unused_field']
-        df['timestart'] = df['timestart'] / 1000
-        df['timeend'] = df['timeend'] / 1000
-        df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']] = df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']].astype(float)
-        if ttype[1]=="FL":
-            opprice = df['close'].iloc[-1]
-            datetime=get_current_datetime_as_string()
-            if mode=='R':
-                p=LongOrder(client,Ti,tinfo[Ti],BotLimit,lvrg)
-                if p!="null" and p!='':    
+    TradeLog={}
+    keys_to_remove = []
+    for Ti,ttype in TokenList.items():
+        if Ti not in TradeLog and Ti not in avoidlist: 
+            Lsafe(client, Ti, mrgType, lvrg)
+            candles = client.futures_continous_klines(pair=Ti, interval=globalInterval,ContractType='PERPETUAL')
+            df = pd.DataFrame(candles)
+            df.columns = ['timestart', 'open', 'high', 'low', 'close', 'volume', 'timeend', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'unused_field']
+            df['timestart'] = df['timestart'] / 1000
+            df['timeend'] = df['timeend'] / 1000
+            df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']] = df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']].astype(float)
+
+            if ttype[1]=="FL" :
+                opprice = df['close'].iloc[-1]
+                if mode=='R':
+                    p=LongOrder(client,Ti,tinfo[Ti],BotLimit,lvrg)
+                    if p!="null" and p!='':    
+                        print("added:",Ti,ttype)
+                        TradeLog[Ti] = [ttype[1],opprice,p]
+                        avoidlist.append(Ti)
+                else:
                     print("added:",Ti,ttype)
-                    add_tradeLog(Ti,datetime,opprice,'A',p,ttype[1])
-                    x+=1
-            else:
-                print("added:",Ti,ttype)
-                add_tradeLog(Ti,datetime,opprice,'A','nan',ttype[1])
-                x+=1
-        if  ttype[1]=="FS":
-            opprice = df['close'].iloc[-1]
-            datetime=get_current_datetime_as_string()
-            if mode=='R':
-                p=ShortOrder(client,Ti,tinfo[Ti],BotLimit,lvrg)
-                if p!="null" and p!='':
+                    TradeLog[Ti] = [ttype[1],opprice,0]
+                    avoidlist.append(Ti)                    
+            if ttype[1]=="FS":
+                opprice = df['close'].iloc[-1]
+                if mode=='R':
+                    p=ShortOrder(client,Ti,tinfo[Ti],BotLimit,lvrg)
+                    if p!="null" and p!='':
+                        print("added:",Ti,ttype)
+                        TradeLog[Ti] = [ttype[1],opprice,p]
+                        avoidlist.append(Ti)
+                else:
                     print("added:",Ti,ttype)
-                    add_tradeLog(Ti,datetime,opprice,'A',p,ttype[1])
-                    x+=1
-            else:
-                print("added:",Ti,ttype)
-                add_tradeLog(Ti,datetime,opprice,'A','nan',ttype[1])
-                x+=1
-        if x>=BotLimit:
-            break
-        sleep(5)
+                    TradeLog[Ti] = [ttype[1],opprice,0]
+                    avoidlist.append(Ti) 
+                    
+            if len(TradeLog)>=BotLimit:
+                break
+            sleep(5)
     while True:
-        TLog=TradeLog()
-        for x in range(len(TLog)):
-            status=TLog.iloc[x]['status']
-            svresult=TLog.iloc[x]['result']
-            Ti=TLog.iloc[x]['token']
-            amount=read_matching_TLog(Ti, 'amount')
-            oprice=read_matching_TLog(Ti, 'opprice')
-            if svresult!='W' and svresult!='L':
-                candles = client.futures_continous_klines(pair=Ti, interval=globalInterval,ContractType='PERPETUAL')
-                df = pd.DataFrame(candles)
-                df.columns = ['timestart', 'open', 'high', 'low', 'close', 'volume', 'timeend', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'unused_field']
-                df['timestart'] = df['timestart'] / 1000
-                df['timeend'] = df['timeend'] / 1000
-                df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']] = df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']].astype(float)
-                cmf_series=CMF(df)
-                rsi_series=rsi(df)
-                macd_series=MACD(df)
-                adx_series=ADX(df)
-                cprice = df['close'].iloc[-1]
-                data = normalize((cmf_series + rsi_series + macd_series + adx_series) / 4)
-                smoothed_series = moving_average(data, window=14)     
-                areas = calculate_areas(smoothed_series)
-                train_market(areas)
-                confidence_score, direction = detect_and_predict(areas)
-                #print(Ti,confidence_score,direction)
-                if status=='FS' and confidence_score>global_confidence and direction==1:
-                    if oprice>cprice:
-                        if mode=='R':
-                            closeShort(client,amount,Ti)
-                        update_cell_Tlog(Ti, 'result', 'W')
-                        print("trade closed : ", Ti,oprice,cprice, 'W')
-                        break
+        for Ti, Token_info in TradeLog.items():
+            status = Token_info[0]
+            entry_price = Token_info[1]
+            amount = Token_info[2]
+    
+            # Fetch latest market data
+            candles = client.futures_continous_klines(pair=Ti, interval=globalInterval, ContractType='PERPETUAL')
+            df = pd.DataFrame(candles)
+            df.columns = ['timestart', 'open', 'high', 'low', 'close', 'volume', 'timeend', 'quote_asset_volume',
+                          'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'unused_field']
+            df['timestart'] = df['timestart'] / 1000
+            df['timeend'] = df['timeend'] / 1000
+            df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume',
+                'taker_buy_quote_asset_volume']] = df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume',
+                                                       'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']].astype(float)
+            exit_price = df['close'].iloc[-1]
+            areas, trend_direction = prepare_features(df)
+            area = areas.iloc[-1]  # Get the moving average value
+            trend_value = trend_direction.iloc[-1]  # Get the trend direction (1 for uptrend, -1 for downtrend)
+            # Get high movement probability based on the areas (moving averages)
+            high_movement_proba = detect_high_movement(areas)  # Check the probability for high movement
+ 
+            # Decision making based on the current state and calculated features
+            if status == 'FS':
+                action = get_action('hold_short',area, trend_value, high_movement_proba)
+                if action == 'exit_short':
+                    if entry_price > exit_price:
+                        if mode == 'R':
+                            closeShort(client, amount, Ti)
+                        print("trade closed : ", Ti, entry_price, exit_price, 'W')
+                        keys_to_remove.append(Ti)
                     else:
-                        if mode=='R':
-                            closeShort(client,amount,Ti)
-                        update_cell_Tlog(Ti, 'result', 'L')
-                        print("trade closed : ", Ti,oprice,cprice, 'L')
-                        break        
-                if status=='FL' and confidence_score>global_confidence and direction==0:
-                    if oprice<cprice:
-                        if mode=='R':
-                            closeLong(client,amount,Ti)
-                        update_cell_Tlog(Ti, 'result', 'W')
-                        print("trade closed : ", Ti,oprice,cprice, 'W')
-                        break
+                        if mode == 'R':
+                            closeShort(client, amount, Ti)
+                        print("trade closed : ", Ti, entry_price, exit_price, 'L')
+                        keys_to_remove.append(Ti)
+                    reward('hold_short', action, entry_price, exit_price)
+                    save_q_table(q_table)
+    
+            if status == 'FL':
+                action = get_action('hold_long', area, trend_value, high_movement_proba)
+                if action == 'exit_long':
+                    if entry_price < exit_price:
+                        if mode == 'R':
+                            closeLong(client, amount, Ti)
+                        print("trade closed : ", Ti, entry_price, exit_price, 'W')
+                        keys_to_remove.append(Ti)
                     else:
-                        if mode=='R':
-                            closeLong(client,amount,Ti)
-                        update_cell_Tlog(Ti, 'result', 'L')
-                        print("trade closed : ",Ti,oprice,cprice, 'L')
-                        break        
-        TLog=TradeLog()
-        if all_w_or_l('result', TLog):
-            print("All Trades Done")
-            return True
-        sleep(300)
-    print("All Trades Done")
-    return True
-########trainer############
-def MAIN_TRADER(excludedlist,CurrencyType,BotLimit,lvrg,initial,mode):
+                        if mode == 'R':
+                            closeLong(client, amount, Ti)
+                        print("trade closed : ", Ti, entry_price, exit_price, 'L')
+                        keys_to_remove.append(Ti)
+                    reward('hold_long', action, entry_price, exit_price)
+                    save_q_table(q_table)
+    
+        # Remove all elements corresponding to the keys in the list
+        for key in keys_to_remove:
+            TradeLog.pop(key, None)
+        
+        if len(TradeLog) == 0:
+            return avoidlist
+    
+        sleep(900)
+        
+def newwave_market(excludedlist,CurrencyType,BotLimit,lvrg,initial_amt,mode):
     client = Client(api_key, api_secret)
+    avoidlist=[]
+    global globalInterval
     while True:
         balance = client.futures_account_balance()
         bal = None
         for wc in balance:
             if wc["asset"] == 'USDT':
                 bal = float(wc["balance"])
-        if bal > initial:
-            amnt = bal - initial
+        if bal > initial_amt:
+            amnt = bal - initial_amt
             client.futures_account_transfer(asset='USDT', amount=amnt, Type=2)
             print("Profit Transfer:", amnt)
         if bal > 100:
@@ -594,20 +749,29 @@ def MAIN_TRADER(excludedlist,CurrencyType,BotLimit,lvrg,initial,mode):
             BotLimit=8
         if bal > 900:
             BotLimit=10
-        TokenList,tinfo,global_confidence = batchCollector(excludedlist,CurrencyType)
+        TokenList,tinfo = batchCollector(excludedlist,CurrencyType)
         print('tokens found:',len(TokenList))
-        print('global confidence:',global_confidence)
-        #break
-        if len(TokenList)>0:
-            Rtrade(TokenList,BotLimit,lvrg,tinfo,mode,global_confidence)
-        clear_tradeLog()
-        print("sleeping waiting for next cycle")
-clear_tradeLog()
-BotLimit=2
-mode='R'
+        if len(TokenList)<BotLimit:
+            BotLimit=len(TokenList)
+            avoidlist=newwave_Trader(TokenList,tinfo,CurrencyType,BotLimit,lvrg,mode,avoidlist)
+        elif len(TokenList)==0:
+            print('no results bottomed out changing interval')
+            if globalInterval==Client.KLINE_INTERVAL_30MINUTE:
+                globalInterval=Client.KLINE_INTERVAL_15MINUTE
+            else:
+                globalInterval=Client.KLINE_INTERVAL_30MINUTE
+        elif len(TokenList)>BotLimit:
+            avoidlist=newwave_Trader(TokenList,tinfo,CurrencyType,BotLimit,lvrg,mode,avoidlist)
+        if len(avoidlist)>=10:
+            print("avoidlist full reseting")
+            avoidlist=[]
+        sleep(900)
+        
+BotLimit=3
+mode='S'
 print("Booting up... ")
 excludedlist=['BTCUSDT','BTCDOMUSDT','USDCUSDT','ETHUSDT','XEMUSDT']
 CurrencyType="USDT"
 lvrg=2
 initial_amt=1000
-MAIN_TRADER(excludedlist,CurrencyType,BotLimit,lvrg,initial_amt,mode)
+newwave_market(excludedlist,CurrencyType,BotLimit,lvrg,initial_amt,mode)
