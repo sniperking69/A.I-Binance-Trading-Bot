@@ -21,6 +21,7 @@ import joblib
 from sklearn.preprocessing import StandardScaler
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import MinMaxScaler
+from scipy.integrate import trapezoid
 globalInterval=Client.KLINE_INTERVAL_15MINUTE
 ########close/open trades###########
 def Lsafe(client,Seed,mrgType,lvrg):
@@ -112,6 +113,11 @@ def closeShort(client, p, Seed):
         return 'null'
 
 ##########################preceptron###################################
+# Define the file path for the Q-table
+q_table_file = 'models/q_table.pkl'
+# Declare a global variable for cached high movement probability data
+cached_high_movement_proba = None
+# Load Q-table from memory or initialize if not present
 
 # Function to train the market models incrementally for high movement detection
 def train_market(areas, model_file="models/high_movement_model.pkl"):
@@ -184,6 +190,16 @@ def detect_high_movement(areas, model_file="models/high_movement_model.pkl"):
 
     # Return the probability of high movement
     return detection_proba
+
+
+def detect_high_movement_cached(areas):
+    global cached_high_movement_proba
+
+    # If the cache is empty or the areas change, compute it once
+    if cached_high_movement_proba is None:
+        cached_high_movement_proba = detect_high_movement(areas)
+
+    return cached_high_movement_proba
 
 
 ##########################################DEEP Q######################################################
@@ -308,107 +324,115 @@ def get_action(state, area, trend_direction, high_movement_proba):
     return chosen_action
 
 
-# RL_train function to track total profit as a percentage and adjust rewards for learning from losses
 def RL_train(df):
-    global q_table, epsilon
+    global q_table, epsilon, cached_high_movement_proba
 
     num_episodes = 0
     wins = 0
     losses = 0
     win_rate = 100
-    max_episodes = 10
-    win_rate_history = []
+    max_episodes = 100
     
     total_profit_percentage = 0  # Initialize total profit percentage
 
     # Prepare the features for training: normalized areas and trend
     areas, trend_direction = prepare_features(df)
+    
+    # Cache values upfront to avoid repeated calculations
+    close_prices = df['close'].values
+    trend_values = trend_direction.values
+    area_values = areas.values
 
-    # Train the model for high-movement detection
-    train_market(areas)
+    df_len = len(df)
 
-    while True:
+    # Precompute the high movement probability once and store it globally
+    cached_high_movement_proba = detect_high_movement(area_values)
+
+    while num_episodes < max_episodes:
         state = 'not_holding'
         entry_price = None
 
-        for i in range(1, len(df)):
-            current_price = df['close'].iloc[i]  # Get the current price
-            area = areas.iloc[i]  # Get the moving average value
-            trend_value = trend_direction.iloc[i]  # Get the trend direction (1 for uptrend, -1 for downtrend)
+        for i in range(1, df_len):
+            current_price = close_prices[i]
+            area = area_values[i]
+            trend_value = trend_values[i]
 
-            # Pass the array/slice of areas up to index `i`
-            high_movement_proba = detect_high_movement(areas[:i+1])  # Check the probability for high movement
+            # Reuse cached high movement probability
+            high_movement_proba = detect_high_movement_cached(area_values[:i+1])
 
             # Get the action based on the current state, moving average, trend, and high movement probability
             action = get_action(state, area, trend_value, high_movement_proba)
 
-            # Process the action and update the state
             if state == 'not_holding' and action in ['entry_long', 'entry_short']:
                 entry_price = current_price
                 state = 'hold_long' if action == 'entry_long' else 'hold_short'
 
             elif state == 'hold_long' and action == 'exit_long':
                 exit_price = current_price
-                realized_profit_percentage = ((exit_price - entry_price) / entry_price) * 100  # Profit percentage for long
-                total_profit_percentage += realized_profit_percentage  # Add to total percentage profit
-                reward(state, action, entry_price, exit_price)  # Update reward
+                realized_profit_percentage = ((exit_price - entry_price) / entry_price) * 100
+                total_profit_percentage += realized_profit_percentage
+                reward(state, action, entry_price, exit_price)
                 state = 'not_holding'
                 entry_price = None
 
             elif state == 'hold_short' and action == 'exit_short':
                 exit_price = current_price
-                realized_profit_percentage = ((entry_price - exit_price) / entry_price) * 100  # Profit percentage for short
-                total_profit_percentage += realized_profit_percentage  # Add to total percentage profit
-                reward(state, action, entry_price, exit_price)  # Update reward
+                realized_profit_percentage = ((entry_price - exit_price) / entry_price) * 100
+                total_profit_percentage += realized_profit_percentage
+                reward(state, action, entry_price, exit_price)
                 state = 'not_holding'
                 entry_price = None
 
         # Force-close any open trades at the end of the dataset
         if state == 'hold_long':
-            exit_price = df['close'].iloc[-1]
-            realized_profit_percentage = ((exit_price - entry_price) / entry_price) * 100  # Calculate percentage profit
-            total_profit_percentage += realized_profit_percentage  # Add to total percentage profit
-            reward(state, 'exit_long', entry_price, exit_price)  # Force close the long trade
+            exit_price = close_prices[-1]
+            realized_profit_percentage = ((exit_price - entry_price) / entry_price) * 100
+            total_profit_percentage += realized_profit_percentage
+            reward(state, 'exit_long', entry_price, exit_price)
             if exit_price > entry_price:
                 wins += 1
             else:
                 losses += 1
 
         elif state == 'hold_short':
-            exit_price = df['close'].iloc[-1]
-            realized_profit_percentage = ((entry_price - exit_price) / entry_price) * 100  # Calculate percentage profit
-            total_profit_percentage += realized_profit_percentage  # Add to total percentage profit
-            reward(state, 'exit_short', entry_price, exit_price)  # Force close the short trade
+            exit_price = close_prices[-1]
+            realized_profit_percentage = ((entry_price - exit_price) / entry_price) * 100
+            total_profit_percentage += realized_profit_percentage
+            reward(state, 'exit_short', entry_price, exit_price)
             if exit_price < entry_price:
                 wins += 1
             else:
                 losses += 1
 
-        # Increment episode counter
         num_episodes += 1
 
-        # Calculate win rate and check for stopping condition
         if wins + losses > 0:
             win_rate = (wins / (wins + losses)) * 100
-            win_rate_history.append(win_rate)
 
-        # Check if maximum number of episodes has been reached
-        if num_episodes >= max_episodes:
-            break
-
-        # Decay epsilon for exploration-exploitation balance
         if epsilon > epsilon_min:
             epsilon *= epsilon_decay
 
-    # Save Q-table after training
+    return win_rate, total_profit_percentage
+
+
+def run_training(TokenInfo):
+    global q_table  # Make sure we're working with the global Q-table
+
+    winratecoll = {}
+
+    for Ti, df in TokenInfo.items():
+        try:
+            win_rate, total_profit = RL_train(df)   
+            winratecoll[Ti] = [round(win_rate, 3), round(total_profit, 3)]
+            #print(Ti, round(win_rate, 3), round(total_profit, 3))
+        except Exception as e:
+            print(f"RL: {str(e)}")  # Keep this for debugging
+            continue
+
+    # Save the Q-table after all tokens have been trained
     save_q_table(q_table)
 
-    # Return the win rate and total profit percentage
-    return win_rate, total_profit_percentage  # Return win rate and profit percentage
-
-
-
-
+    return winratecoll
 #################### Get token info #########################
 
 def batchCollector(excludedlist,CurrencyType):
@@ -445,20 +469,20 @@ def FindNewToken(client,exInfo,CurrencyType):
 
 def OpenLayer(excludedlist, TokenInfo): 
     ranked_result = {}
-    winratecoll = {}
-    print("Training and detecting")
+    
+    print("Lookin at the tokens")
 
     # Training Loop
     for Ti, df in TokenInfo.items():
         try:
-            win_rate, total_profit = RL_train(df)   
-            winratecoll[Ti] = [round(win_rate,3),round(total_profit,3)]
-            
-            print(Ti,round(win_rate,3), round(total_profit,3))
+            areas, trend_direction = prepare_features(df)
+            train_market(areas)
         except Exception as e:
-            print(f"RL: {str(e)}")  # Keep this for debugging
+            print(f"Looking: {str(e)}")  # Keep this for debugging
             continue
-
+    print("Training on the tokens")
+    # Training Loop
+    winratecoll = run_training(TokenInfo)
     # Prediction Loop
     for Ti, df in TokenInfo.items():
         try:
@@ -485,6 +509,7 @@ def OpenLayer(excludedlist, TokenInfo):
 #################### Get token info #########################
 
 ############# Indicators #############
+# Handle NaNs helper function
 def handle_nans(series, method='drop'):
     if method == 'drop':
         return series.dropna()
@@ -495,22 +520,28 @@ def handle_nans(series, method='drop'):
     else:
         raise ValueError("Invalid method specified for NaN handling.")
 
+# Average True Range (ATR)
 def calculate_atr(df, period=10):
     """Calculate Average True Range (ATR) for a given period."""
+    df = df[['high', 'low', 'close']].dropna()  # Ensure no NaN values in required columns
+
     high_low = df['high'] - df['low']
     high_close = np.abs(df['high'] - df['close'].shift())
     low_close = np.abs(df['low'] - df['close'].shift())
     
-    tr = high_low.combine(high_close, max).combine(low_close, max)
+    # Use np.maximum to combine values for true range
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    
+    # Efficient rolling mean with a minimum period to handle missing data
     atr = tr.rolling(window=period, min_periods=1).mean()
     
     return atr
 
+# SuperTrend Indicator
 def superTrend(df, period=10, multiplier=3):
     """Calculate Supertrend indicator and return direction (1 for uptrend, -1 for downtrend)."""
     atr = calculate_atr(df, period)
     
-    # Calculate the basic upper and lower bands
     hl2 = (df['high'] + df['low']) / 2
     upper_band = hl2 + (multiplier * atr)
     lower_band = hl2 - (multiplier * atr)
@@ -523,22 +554,23 @@ def superTrend(df, period=10, multiplier=3):
     supertrend.iloc[0] = lower_band.iloc[0]
     direction.iloc[0] = 1
     
+    close_prices = df['close']
+    
     for i in range(1, len(df)):
-        # Update Supertrend based on previous trend direction
-        if direction.iloc[i-1] == 1:  # Uptrend
-            supertrend.iloc[i] = max(lower_band.iloc[i], supertrend.iloc[i-1]) if df['close'].iloc[i] > lower_band.iloc[i] else upper_band.iloc[i]
-            direction.iloc[i] = 1 if df['close'].iloc[i] > supertrend.iloc[i] else -1
-        else:  # Downtrend
-            supertrend.iloc[i] = min(upper_band.iloc[i], supertrend.iloc[i-1]) if df['close'].iloc[i] < upper_band.iloc[i] else lower_band.iloc[i]
-            direction.iloc[i] = -1 if df['close'].iloc[i] < supertrend.iloc[i] else 1
+        if direction.iloc[i-1] == 1:
+            supertrend.iloc[i] = max(lower_band.iloc[i], supertrend.iloc[i-1]) if close_prices.iloc[i] > lower_band.iloc[i] else upper_band.iloc[i]
+            direction.iloc[i] = 1 if close_prices.iloc[i] > supertrend.iloc[i] else -1
+        else:
+            supertrend.iloc[i] = min(upper_band.iloc[i], supertrend.iloc[i-1]) if close_prices.iloc[i] < upper_band.iloc[i] else lower_band.iloc[i]
+            direction.iloc[i] = -1 if close_prices.iloc[i] < supertrend.iloc[i] else 1
     
     return direction
 
+# Moving Average
 def moving_average(series, window=14):
     return series.rolling(window=window, min_periods=1).mean()
 
-# Helper Functions to Calculate Indicators
-
+# RSI Normalized
 def RSI_Normalized(df, period=14):
     delta = df['close'].diff()
     gain = delta.where(delta > 0, 0)
@@ -555,9 +587,13 @@ def RSI_Normalized(df, period=14):
     
     return rsi_normalized
 
+# MACD Normalized
 def MACD_Normalized(df, short_period=12, long_period=26, signal_period=9):
+    df = df[['close']].dropna()  # Ensure no NaNs in 'close'
+    
     short_ema = df['close'].ewm(span=short_period, adjust=False).mean()
     long_ema = df['close'].ewm(span=long_period, adjust=False).mean()
+    
     macd_line = short_ema - long_ema
     signal_line = macd_line.ewm(span=signal_period, adjust=False).mean()
     macd_histogram = macd_line - signal_line
@@ -571,7 +607,7 @@ def MACD_Normalized(df, short_period=12, long_period=26, signal_period=9):
     
     return macd_normalized
 
-
+# CMF Normalized
 def CMF_Normalized(df, period=20):
     mf = ((df['close'] - df['low']) - (df['high'] - df['close'])) / (df['high'] - df['low'])
     mfv = mf * df['volume']
@@ -586,15 +622,26 @@ def CMF_Normalized(df, period=20):
     
     return cmf_normalized
 
-
+# Calculate Moving Average Areas using trapezoidal integration
 def calculate_moving_avg_areas(moving_avg_data, window_size=5):
-    # Calculate areas based on moving averages using a rolling window
-    areas = moving_avg_data.diff().rolling(window=window_size).apply(lambda x: np.trapz(x, dx=1), raw=True)
-    areas = handle_nans(areas, method='mean_fill')  # Fill missing areas with zero or other appropriate value
+    """
+    Calculate areas based on moving averages using a rolling window and trapezoidal integration.
+    """
+    diff_data = moving_avg_data.diff()
+
+    # Safe trapezoidal calculation
+    def safe_trapezoid(x):
+        if len(x) >= 2:  # Only apply trapezoid if we have enough data points
+            return trapezoid(x, dx=1)
+        return 0  # Return 0 for insufficient points
+
+    areas = diff_data.rolling(window=window_size).apply(lambda x: safe_trapezoid(x), raw=True)
+    areas = handle_nans(areas, method='mean_fill')
+    
     return areas
 
-def prepare_features(data):
-    df = data.copy()  # Work on a copy to avoid modifying the original DataFrame
+# Prepare features by combining indicators and areas
+def prepare_features(df):
     
     # Calculate trend and indicators
     Trend = superTrend(df)
@@ -768,7 +815,7 @@ def newwave_market(excludedlist,CurrencyType,BotLimit,lvrg,initial_amt,mode):
         sleep(900)
         
 BotLimit=3
-mode='S'
+mode='R'
 print("Booting up... ")
 excludedlist=['BTCUSDT','BTCDOMUSDT','USDCUSDT','ETHUSDT','XEMUSDT']
 CurrencyType="USDT"
