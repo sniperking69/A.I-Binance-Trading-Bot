@@ -230,53 +230,52 @@ def save_q_table(q_table):
 q_table = load_q_table()
 
 # Hyperparameters
-epsilon = 0.9  # Start with a higher exploration rate to encourage exploration
+epsilon = 0.5  # Start with a higher exploration rate to encourage exploration
 epsilon_decay = 0.9995  # Use a more gradual decay to reduce exploration slowly
 epsilon_min = 0.1  # Higher minimum exploration rate to maintain some exploration
 alpha = 0.1  # Learning rate
 gamma = 0.8  # Discount factor
 
-# Updated reward function to calculate profit as a percentage and penalize large losses
+# Updated reward function to update both the taken and the correct actions
 def reward(state, action, entry_price, exit_price):
     global q_table
 
-    # Calculate profit or loss as a percentage
+    # Calculate profit or loss as a percentage for long and short
     if action == 'exit_long':
         realized_profit_percentage = ((exit_price - entry_price) / entry_price) * 100  # Percentage profit for long
         if realized_profit_percentage < 0:
-            # Penalize the loss in long position more aggressively
             realized_profit_percentage *= 2  # Double penalty for negative trades
-            # Reward the opposite (short) action for learning
+            # Update Q-table for the wrong action (long)
+            if (state, action) in q_table:
+                old_value = q_table[(state, action)]
+                next_state = 'not_holding'
+                next_max = max(q_table.get((next_state, a), 0) for a in ['entry_long', 'entry_short', 'not_holding'])
+                new_value = old_value + alpha * (realized_profit_percentage + gamma * next_max - old_value)
+                q_table[(state, action)] = new_value
+
+            # Reward the opposite action (entry_short) for learning
             if (state, 'entry_short') in q_table:
                 q_table[(state, 'entry_short')] += abs(realized_profit_percentage)  # Positive reward for short
-    
+
     elif action == 'exit_short':
         realized_profit_percentage = ((entry_price - exit_price) / entry_price) * 100  # Percentage profit for short
         if realized_profit_percentage < 0:
-            # Penalize the loss in short position more aggressively
             realized_profit_percentage *= 2  # Double penalty for negative trades
-            # Reward the opposite (long) action for learning
+            # Update Q-table for the wrong action (short)
+            if (state, action) in q_table:
+                old_value = q_table[(state, action)]
+                next_state = 'not_holding'
+                next_max = max(q_table.get((next_state, a), 0) for a in ['entry_long', 'entry_short', 'not_holding'])
+                new_value = old_value + alpha * (realized_profit_percentage + gamma * next_max - old_value)
+                q_table[(state, action)] = new_value
+
+            # Reward the opposite action (entry_long) for learning
             if (state, 'entry_long') in q_table:
                 q_table[(state, 'entry_long')] += abs(realized_profit_percentage)  # Positive reward for long
-    
+
     else:
         return  # No reward update during entry or holding
 
-    # Adjust reward based on profit percentage
-    reward_value = realized_profit_percentage
-
-    # Update the Q-value for the current state-action pair
-    if (state, action) in q_table:
-        old_value = q_table[(state, action)]
-        next_state = 'not_holding'
-
-        # Only consider valid next states for max Q-value calculation
-        valid_next_actions = ['entry_long', 'entry_short', 'not_holding']
-        next_max = max(q_table.get((next_state, a), 0) for a in valid_next_actions)
-
-        # Update Q-value using the Q-learning formula
-        new_value = old_value + alpha * (reward_value + gamma * next_max - old_value)
-        q_table[(state, action)] = new_value
 
 
 # Adjust the get_action function to favor learning from profitable trades
@@ -494,15 +493,17 @@ def OpenLayer(excludedlist, TokenInfo):
                 if Ti in winratecoll and winratecoll[Ti][0]>0 and winratecoll[Ti][1]>0:
                     action = get_action('not_holding',  area, trend_value, high_movement_proba)
                     if action == 'entry_long':
-                        ranked_result[Ti] = [winratecoll[Ti][1], 'FL']
+                        ranked_result[Ti] = [winratecoll[Ti][0],winratecoll[Ti][1], 'FL']
                     elif action == 'entry_short':
-                        ranked_result[Ti] = [winratecoll[Ti][1], 'FS']
+                        ranked_result[Ti] = [winratecoll[Ti][0],winratecoll[Ti][1], 'FS']
         except Exception as e:
             print(f"predictloop error: {str(e)}")  # Keep this for debugging
             continue
 
-    # Sort the keys based on the first element of the list in descending order
-    sorted_keys = sorted(ranked_result.keys(), key=lambda x: ranked_result[x][0], reverse=True)
+    # Sort the keys based on the first and second elements of the list in descending order
+    sorted_keys = sorted(ranked_result.keys(), key=lambda x: (ranked_result[x][0], ranked_result[x][1]), reverse=True)
+    
+    # Create the sorted dictionary based on the sorted keys
     sorted_ranked_result = {key: ranked_result[key] for key in sorted_keys}
     
     return sorted_ranked_result
@@ -668,50 +669,75 @@ def prepare_features(df):
 
     return combined_features, Trend  # Return the combined features and trend
 ########crazy NewWave############
-def newwave_Trader(TokenList,tinfo,CurrencyType,BotLimit,lvrg,mode,avoidlist):
+def newwave_Trader(CurrencyType,BotLimit,lvrg,mode):
+    global globalInterval
     client = Client(api_key, api_secret)
     mrgType="ISOLATED"
     TradeLog={}
     keys_to_remove = []
-    for Ti,ttype in TokenList.items():
-        if Ti not in TradeLog and Ti not in avoidlist: 
-            Lsafe(client, Ti, mrgType, lvrg)
-            candles = client.futures_continous_klines(pair=Ti, interval=globalInterval,ContractType='PERPETUAL')
-            df = pd.DataFrame(candles)
-            df.columns = ['timestart', 'open', 'high', 'low', 'close', 'volume', 'timeend', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'unused_field']
-            df['timestart'] = df['timestart'] / 1000
-            df['timeend'] = df['timeend'] / 1000
-            df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']] = df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']].astype(float)
-
-            if ttype[1]=="FL" :
-                opprice = df['close'].iloc[-1]
-                if mode=='R':
-                    p=LongOrder(client,Ti,tinfo[Ti],BotLimit,lvrg)
-                    if p!="null" and p!='':    
-                        print("added:",Ti,ttype)
-                        TradeLog[Ti] = [ttype[1],opprice,p]
-                        avoidlist.append(Ti)
-                else:
-                    print("added:",Ti,ttype)
-                    TradeLog[Ti] = [ttype[1],opprice,0]
-                    avoidlist.append(Ti)                    
-            if ttype[1]=="FS":
-                opprice = df['close'].iloc[-1]
-                if mode=='R':
-                    p=ShortOrder(client,Ti,tinfo[Ti],BotLimit,lvrg)
-                    if p!="null" and p!='':
-                        print("added:",Ti,ttype)
-                        TradeLog[Ti] = [ttype[1],opprice,p]
-                        avoidlist.append(Ti)
-                else:
-                    print("added:",Ti,ttype)
-                    TradeLog[Ti] = [ttype[1],opprice,0]
-                    avoidlist.append(Ti) 
-                    
-            if len(TradeLog)>=BotLimit:
-                break
-            sleep(5)
+    avoidlist=[]
     while True:
+        
+        if len(TradeLog)<BotLimit:
+            balance = client.futures_account_balance()
+            bal = None
+            for wc in balance:
+                if wc["asset"] == 'USDT':
+                    bal = float(wc["balance"])
+            if bal > initial_amt:
+                amnt = bal - initial_amt
+                client.futures_account_transfer(asset='USDT', amount=amnt, Type=2)
+                print("Profit Transfer:", amnt)
+            if bal > 100:
+                BotLimit=4
+            if bal > 500:
+                BotLimit=8
+            if bal > 900:
+                BotLimit=10
+            TokenList,tinfo = batchCollector(excludedlist,CurrencyType)
+            print('tokens found:',len(TokenList))
+            
+        for Ti,ttype in TokenList.items():
+            if Ti not in TradeLog and Ti not in avoidlist: 
+                Lsafe(client, Ti, mrgType, lvrg)
+                candles = client.futures_continous_klines(pair=Ti, interval=globalInterval,ContractType='PERPETUAL')
+                df = pd.DataFrame(candles)
+                df.columns = ['timestart', 'open', 'high', 'low', 'close', 'volume', 'timeend', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'unused_field']
+                df['timestart'] = df['timestart'] / 1000
+                df['timeend'] = df['timeend'] / 1000
+                df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']] = df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']].astype(float)
+    
+                if ttype[2]=="FL" :
+                    opprice = df['close'].iloc[-1]
+                    if mode=='R':
+                        p=LongOrder(client,Ti,tinfo[Ti],BotLimit,lvrg)
+                        if p!="null" and p!='':    
+                            print("added:",Ti,ttype)
+                            TradeLog[Ti] = [ttype[2],opprice,p]
+                            avoidlist.append(Ti)
+                            sleep(5)
+                    else:
+                        print("added:",Ti,ttype)
+                        TradeLog[Ti] = [ttype[2],opprice,0]
+                        avoidlist.append(Ti)                    
+                if ttype[2]=="FS":
+                    opprice = df['close'].iloc[-1]
+                    if mode=='R':
+                        p=ShortOrder(client,Ti,tinfo[Ti],BotLimit,lvrg)
+                        if p!="null" and p!='':
+                            print("added:",Ti,ttype)
+                            TradeLog[Ti] = [ttype[2],opprice,p]
+                            avoidlist.append(Ti)
+                            sleep(5)
+                    else:
+                        print("added:",Ti,ttype)
+                        TradeLog[Ti] = [ttype[2],opprice,0]
+                        avoidlist.append(Ti) 
+                        
+                if len(TradeLog)>=BotLimit:
+                    break
+                
+                
         for Ti, Token_info in TradeLog.items():
             status = Token_info[0]
             entry_price = Token_info[1]
@@ -771,49 +797,13 @@ def newwave_Trader(TokenList,tinfo,CurrencyType,BotLimit,lvrg,mode,avoidlist):
         for key in keys_to_remove:
             TradeLog.pop(key, None)
         
-        if len(TradeLog) == 0:
-            return avoidlist
-    
-        sleep(900)
-        
-def newwave_market(excludedlist,CurrencyType,BotLimit,lvrg,initial_amt,mode):
-    client = Client(api_key, api_secret)
-    avoidlist=[]
-    global globalInterval
-    while True:
-        balance = client.futures_account_balance()
-        bal = None
-        for wc in balance:
-            if wc["asset"] == 'USDT':
-                bal = float(wc["balance"])
-        if bal > initial_amt:
-            amnt = bal - initial_amt
-            client.futures_account_transfer(asset='USDT', amount=amnt, Type=2)
-            print("Profit Transfer:", amnt)
-        if bal > 100:
-            BotLimit=4
-        if bal > 500:
-            BotLimit=8
-        if bal > 900:
-            BotLimit=10
-        TokenList,tinfo = batchCollector(excludedlist,CurrencyType)
-        print('tokens found:',len(TokenList))
-        if len(TokenList)<BotLimit:
-            BotLimit=len(TokenList)
-            avoidlist=newwave_Trader(TokenList,tinfo,CurrencyType,BotLimit,lvrg,mode,avoidlist)
-        elif len(TokenList)==0:
-            print('no results bottomed out changing interval')
-            if globalInterval==Client.KLINE_INTERVAL_30MINUTE:
-                globalInterval=Client.KLINE_INTERVAL_15MINUTE
-            else:
-                globalInterval=Client.KLINE_INTERVAL_30MINUTE
-        elif len(TokenList)>BotLimit:
-            avoidlist=newwave_Trader(TokenList,tinfo,CurrencyType,BotLimit,lvrg,mode,avoidlist)
         if len(avoidlist)>=10:
             print("avoidlist full reseting")
             avoidlist=[]
+            
         sleep(900)
-        
+   
+       
 BotLimit=3
 mode='R'
 print("Booting up... ")
@@ -821,4 +811,4 @@ excludedlist=['BTCUSDT','BTCDOMUSDT','USDCUSDT','ETHUSDT','XEMUSDT']
 CurrencyType="USDT"
 lvrg=2
 initial_amt=1000
-newwave_market(excludedlist,CurrencyType,BotLimit,lvrg,initial_amt,mode)
+newwave_Trader(CurrencyType,BotLimit,lvrg,mode)
