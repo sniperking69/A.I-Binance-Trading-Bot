@@ -111,7 +111,6 @@ def closeShort(client, p, Seed):
         return f"Closed short position with quantity {p}"
     except:
         return 'null'
-
 ##########################preceptron###################################
 # Define the file path for the Q-table
 q_table_file = 'models/q_table.pkl'
@@ -224,7 +223,6 @@ def load_q_table():
 def save_q_table(q_table):
     with open(q_table_file, 'wb') as f:
         pickle.dump(q_table, f)
-    #print("Q-table saved to file.")
 
 # Initialize or load the Q-table
 q_table = load_q_table()
@@ -236,13 +234,13 @@ epsilon_min = 0.1  # Higher minimum exploration rate to maintain some exploratio
 alpha = 0.1  # Learning rate
 gamma = 0.8  # Discount factor
 
-# Updated reward function to update both the taken and the correct actions
+# Updated reward function
 def reward(state, action, entry_price, exit_price):
     global q_table
 
     # Calculate profit or loss as a percentage for long and short
     if action == 'exit_long':
-        realized_profit_percentage = ((exit_price - entry_price) / entry_price) * 100  # Percentage profit for long
+        realized_profit_percentage = ((exit_price - entry_price) / entry_price) * 100
         if realized_profit_percentage < 0:
             realized_profit_percentage *= 2  # Double penalty for negative trades
             # Update Q-table for the wrong action (long)
@@ -258,7 +256,7 @@ def reward(state, action, entry_price, exit_price):
                 q_table[(state, 'entry_short')] += abs(realized_profit_percentage)  # Positive reward for short
 
     elif action == 'exit_short':
-        realized_profit_percentage = ((entry_price - exit_price) / entry_price) * 100  # Percentage profit for short
+        realized_profit_percentage = ((entry_price - exit_price) / entry_price) * 100
         if realized_profit_percentage < 0:
             realized_profit_percentage *= 2  # Double penalty for negative trades
             # Update Q-table for the wrong action (short)
@@ -271,14 +269,12 @@ def reward(state, action, entry_price, exit_price):
 
             # Reward the opposite action (entry_long) for learning
             if (state, 'entry_long') in q_table:
-                q_table[(state, 'entry_long')] += abs(realized_profit_percentage)  # Positive reward for long
+                q_table[(state, 'entry_long')] += abs(realized_profit_percentage)
 
     else:
         return  # No reward update during entry or holding
 
 
-
-# Adjust the get_action function to favor learning from profitable trades
 def get_action(state, area, trend_direction, high_movement_proba):
     global q_table
 
@@ -295,32 +291,38 @@ def get_action(state, area, trend_direction, high_movement_proba):
     # Exploration vs Exploitation
     if random.uniform(0, 1) < epsilon:
         chosen_action = random.choice(valid_actions)  # Random action from valid actions only
-        return chosen_action
+        return chosen_action, random.uniform(0, 1)  # Return random confidence during exploration
 
     # Compute Q-values for valid actions only
     q_values = np.array([q_table.get((state, action), 0) for action in valid_actions])
 
-    # Use the trend direction and high movement probability to influence the decision
-    if state == 'not_holding':
-        # If uptrend and high movement probability, favor 'entry_long'
-        if trend_direction == 1 and high_movement_proba > 0.3:
-            q_values[valid_actions.index('entry_long')] += 0.1  # Increase the score
-        
-        # If downtrend and high movement probability, favor 'entry_short'
-        elif trend_direction == -1 and high_movement_proba > 0.3:
-            q_values[valid_actions.index('entry_short')] += 0.1
+    # Shift Q-values to be positive if any are negative
+    min_q_value = np.min(q_values)
+    if min_q_value < 0:
+        q_values -= min_q_value  # Shift Q-values to make them non-negative
 
-    elif state == 'hold_long' and trend_direction == 1 and high_movement_proba < 0.2:
-        # Favor holding onto winning long positions
-        q_values[valid_actions.index('hold_long')] += 0.1
+    # Sum of Q-values for normalization
+    q_sum = np.sum(q_values)
+    
+    # Avoid dividing by zero
+    if q_sum == 0:
+        return random.choice(valid_actions), 0.5  # Return neutral confidence if no learned Q-values
 
-    elif state == 'hold_short' and trend_direction == -1 and high_movement_proba < 0.2:
-        # Favor holding onto winning short positions
-        q_values[valid_actions.index('hold_short')] += 0.1
+    # Select the action with the highest Q-value
+    chosen_action_index = np.argmax(q_values)
+    chosen_action = valid_actions[chosen_action_index]
 
-    # Select the action with the highest Q-value among valid actions
-    chosen_action = valid_actions[np.argmax(q_values)]
-    return chosen_action
+    # Confidence is the ratio of the chosen Q-value to the sum of all Q-values
+    confidence = q_values[chosen_action_index] / q_sum
+
+    # Adjust the confidence value to reflect the probability of winning big (scale it to 0.5-1.0 for entry/exit)
+    if chosen_action in ['entry_long', 'entry_short', 'exit_long', 'exit_short']:
+        confidence = 0.5 + confidence * 0.5  # Boost confidence for entry/exit actions
+    elif chosen_action in ['hold_long', 'hold_short']:
+        confidence = confidence * 0.5  # Lower confidence for holding
+
+    return chosen_action, confidence
+
 
 
 def RL_train(df):
@@ -359,28 +361,33 @@ def RL_train(df):
             # Reuse cached high movement probability
             high_movement_proba = detect_high_movement_cached(area_values[:i+1])
 
-            # Get the action based on the current state, moving average, trend, and high movement probability
-            action = get_action(state, area, trend_value, high_movement_proba)
+            # Get the action and confidence based on the current state
+            action, confidence = get_action(state, area, trend_value, high_movement_proba)
 
-            if state == 'not_holding' and action in ['entry_long', 'entry_short']:
-                entry_price = current_price
-                state = 'hold_long' if action == 'entry_long' else 'hold_short'
+            # Debugging: print action confidence
+            #print(f"Action: {action}, Confidence: {confidence}")
 
-            elif state == 'hold_long' and action == 'exit_long':
-                exit_price = current_price
-                realized_profit_percentage = ((exit_price - entry_price) / entry_price) * 100
-                total_profit_percentage += realized_profit_percentage
-                reward(state, action, entry_price, exit_price)
-                state = 'not_holding'
-                entry_price = None
+            # Only act if the confidence is greater than 0.5
+            if confidence > 0.5:
+                if state == 'not_holding' and action in ['entry_long', 'entry_short']:
+                    entry_price = current_price
+                    state = 'hold_long' if action == 'entry_long' else 'hold_short'
 
-            elif state == 'hold_short' and action == 'exit_short':
-                exit_price = current_price
-                realized_profit_percentage = ((entry_price - exit_price) / entry_price) * 100
-                total_profit_percentage += realized_profit_percentage
-                reward(state, action, entry_price, exit_price)
-                state = 'not_holding'
-                entry_price = None
+                elif state == 'hold_long' and action == 'exit_long':
+                    exit_price = current_price
+                    realized_profit_percentage = ((exit_price - entry_price) / entry_price) * 100
+                    total_profit_percentage += realized_profit_percentage
+                    reward(state, action, entry_price, exit_price)
+                    state = 'not_holding'
+                    entry_price = None
+
+                elif state == 'hold_short' and action == 'exit_short':
+                    exit_price = current_price
+                    realized_profit_percentage = ((entry_price - exit_price) / entry_price) * 100
+                    total_profit_percentage += realized_profit_percentage
+                    reward(state, action, entry_price, exit_price)
+                    state = 'not_holding'
+                    entry_price = None
 
         # Force-close any open trades at the end of the dataset
         if state == 'hold_long':
@@ -415,7 +422,7 @@ def RL_train(df):
 
 
 def run_training(TokenInfo):
-    global q_table  # Make sure we're working with the global Q-table
+    global q_table
 
     winratecoll = {}
 
@@ -423,15 +430,14 @@ def run_training(TokenInfo):
         try:
             win_rate, total_profit = RL_train(df)   
             winratecoll[Ti] = [round(win_rate, 3), round(total_profit, 3)]
-            #print(Ti, round(win_rate, 3), round(total_profit, 3))
         except Exception as e:
-            print(f"RL: {str(e)}")  # Keep this for debugging
+            print(f"RL: {str(e)}")
             continue
 
-    # Save the Q-table after all tokens have been trained
     save_q_table(q_table)
 
     return winratecoll
+
 #################### Get token info #########################
 
 def batchCollector(excludedlist,CurrencyType):
@@ -466,10 +472,10 @@ def FindNewToken(client,exInfo,CurrencyType):
             continue
     return tokenInfo,symInfo
 
-def OpenLayer(excludedlist, TokenInfo): 
+def OpenLayer(excludedlist, TokenInfo):
     ranked_result = {}
-    
-    print("Lookin at the tokens")
+
+    print("Looking at the tokens")
 
     # Training Loop
     for Ti, df in TokenInfo.items():
@@ -479,9 +485,11 @@ def OpenLayer(excludedlist, TokenInfo):
         except Exception as e:
             print(f"Looking: {str(e)}")  # Keep this for debugging
             continue
+
     print("Training on the tokens")
     # Training Loop
     winratecoll = run_training(TokenInfo)
+    
     # Prediction Loop
     for Ti, df in TokenInfo.items():
         try:
@@ -490,23 +498,25 @@ def OpenLayer(excludedlist, TokenInfo):
                 area = areas.iloc[-1]  # Get the moving average value
                 trend_value = trend_direction.iloc[-1]  # Get the trend direction (1 for uptrend, -1 for downtrend)
                 high_movement_proba = detect_high_movement(areas)  # Check the probability for high movement
-                if Ti in winratecoll and winratecoll[Ti][0]>0 and winratecoll[Ti][1]>0:
-                    action = get_action('not_holding',  area, trend_value, high_movement_proba)
+                action, confidence = get_action('not_holding', area, trend_value, high_movement_proba)
+                if confidence>0.5:
                     if action == 'entry_long':
-                        ranked_result[Ti] = [winratecoll[Ti][0],winratecoll[Ti][1], 'FL']
-                    elif action == 'entry_short':
-                        ranked_result[Ti] = [winratecoll[Ti][0],winratecoll[Ti][1], 'FS']
+                        ranked_result[Ti] = [confidence, 'FL']
+                    if action == 'entry_short':
+                        ranked_result[Ti] = [confidence, 'FS']
         except Exception as e:
             print(f"predictloop error: {str(e)}")  # Keep this for debugging
             continue
-
-    # Sort the keys based on the first and second elements of the list in descending order
-    sorted_keys = sorted(ranked_result.keys(), key=lambda x: (ranked_result[x][0], ranked_result[x][1]), reverse=True)
+    
+    # Sort the keys based on confidence (1st element in the list) in descending order
+    sorted_keys = sorted(ranked_result.keys(), key=lambda x: ranked_result[x][0], reverse=True)
     
     # Create the sorted dictionary based on the sorted keys
     sorted_ranked_result = {key: ranked_result[key] for key in sorted_keys}
     
     return sorted_ranked_result
+
+
 #################### Get token info #########################
 
 ############# Indicators #############
@@ -668,16 +678,15 @@ def prepare_features(df):
     combined_features = (areas + normalized_close_price + area_velocity) / 3  # Average the areas, close price, and velocity
 
     return combined_features, Trend  # Return the combined features and trend
+
 ########crazy NewWave############
 def newwave_Trader(CurrencyType,BotLimit,lvrg,mode):
     global globalInterval
     client = Client(api_key, api_secret)
     mrgType="ISOLATED"
     TradeLog={}
-    keys_to_remove = []
-    avoidlist=[]
     while True:
-        
+        keys_to_remove = []
         if len(TradeLog)<BotLimit:
             balance = client.futures_account_balance()
             bal = None
@@ -692,115 +701,105 @@ def newwave_Trader(CurrencyType,BotLimit,lvrg,mode):
                 BotLimit=4
             if bal > 500:
                 BotLimit=8
-            if bal > 900:
-                BotLimit=10
             TokenList,tinfo = batchCollector(excludedlist,CurrencyType)
             print('tokens found:',len(TokenList))
             
-        for Ti,ttype in TokenList.items():
-            if Ti not in TradeLog and Ti not in avoidlist: 
-                Lsafe(client, Ti, mrgType, lvrg)
-                candles = client.futures_continous_klines(pair=Ti, interval=globalInterval,ContractType='PERPETUAL')
+            for Ti,ttype in TokenList.items():
+                if Ti not in TradeLog: 
+                    Lsafe(client, Ti, mrgType, lvrg)
+                    candles = client.futures_continous_klines(pair=Ti, interval=globalInterval,ContractType='PERPETUAL')
+                    df = pd.DataFrame(candles)
+                    df.columns = ['timestart', 'open', 'high', 'low', 'close', 'volume', 'timeend', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'unused_field']
+                    df['timestart'] = df['timestart'] / 1000
+                    df['timeend'] = df['timeend'] / 1000
+                    df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']] = df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']].astype(float)
+        
+                    if ttype[1]=="FL" :
+                        opprice = df['close'].iloc[-1]
+                        if mode=='R':
+                            p=LongOrder(client,Ti,tinfo[Ti],BotLimit,lvrg)
+                            if p!="null" and p!='':    
+                                print("added:",Ti,ttype)
+                                TradeLog[Ti] = [ttype[1],opprice,p]
+                                sleep(5)
+                        else:
+                            print("added:",Ti,ttype)
+                            TradeLog[Ti] = [ttype[1],opprice,0]          
+                    if ttype[1]=="FS":
+                        opprice = df['close'].iloc[-1]
+                        if mode=='R':
+                            p=ShortOrder(client,Ti,tinfo[Ti],BotLimit,lvrg)
+                            if p!="null" and p!='':
+                                print("added:",Ti,ttype)
+                                TradeLog[Ti] = [ttype[1],opprice,p]
+                                sleep(5)
+                        else:
+                            print("added:",Ti,ttype)
+                            TradeLog[Ti] = [ttype[1],opprice,0]
+                            
+                    if len(TradeLog)>=BotLimit:
+                        break
+                sleep(5)
+                
+        if len(TradeLog)>=BotLimit: #kahbib helped me add this line
+            for Ti, Token_info in TradeLog.items():
+                status = Token_info[0]
+                entry_price = Token_info[1]
+                amount = Token_info[2]
+        
+                # Fetch latest market data
+                candles = client.futures_continous_klines(pair=Ti, interval=globalInterval, ContractType='PERPETUAL')
                 df = pd.DataFrame(candles)
-                df.columns = ['timestart', 'open', 'high', 'low', 'close', 'volume', 'timeend', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'unused_field']
+                df.columns = ['timestart', 'open', 'high', 'low', 'close', 'volume', 'timeend', 'quote_asset_volume',
+                              'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'unused_field']
                 df['timestart'] = df['timestart'] / 1000
                 df['timeend'] = df['timeend'] / 1000
-                df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']] = df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']].astype(float)
-    
-                if ttype[2]=="FL" :
-                    opprice = df['close'].iloc[-1]
-                    if mode=='R':
-                        p=LongOrder(client,Ti,tinfo[Ti],BotLimit,lvrg)
-                        if p!="null" and p!='':    
-                            print("added:",Ti,ttype)
-                            TradeLog[Ti] = [ttype[2],opprice,p]
-                            avoidlist.append(Ti)
-                            sleep(5)
-                    else:
-                        print("added:",Ti,ttype)
-                        TradeLog[Ti] = [ttype[2],opprice,0]
-                        avoidlist.append(Ti)                    
-                if ttype[2]=="FS":
-                    opprice = df['close'].iloc[-1]
-                    if mode=='R':
-                        p=ShortOrder(client,Ti,tinfo[Ti],BotLimit,lvrg)
-                        if p!="null" and p!='':
-                            print("added:",Ti,ttype)
-                            TradeLog[Ti] = [ttype[2],opprice,p]
-                            avoidlist.append(Ti)
-                            sleep(5)
-                    else:
-                        print("added:",Ti,ttype)
-                        TradeLog[Ti] = [ttype[2],opprice,0]
-                        avoidlist.append(Ti) 
-                        
-                if len(TradeLog)>=BotLimit:
-                    break
-                
-                
-        for Ti, Token_info in TradeLog.items():
-            status = Token_info[0]
-            entry_price = Token_info[1]
-            amount = Token_info[2]
-    
-            # Fetch latest market data
-            candles = client.futures_continous_klines(pair=Ti, interval=globalInterval, ContractType='PERPETUAL')
-            df = pd.DataFrame(candles)
-            df.columns = ['timestart', 'open', 'high', 'low', 'close', 'volume', 'timeend', 'quote_asset_volume',
-                          'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'unused_field']
-            df['timestart'] = df['timestart'] / 1000
-            df['timeend'] = df['timeend'] / 1000
-            df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume',
-                'taker_buy_quote_asset_volume']] = df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume',
-                                                       'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']].astype(float)
-            exit_price = df['close'].iloc[-1]
-            areas, trend_direction = prepare_features(df)
-            area = areas.iloc[-1]  # Get the moving average value
-            trend_value = trend_direction.iloc[-1]  # Get the trend direction (1 for uptrend, -1 for downtrend)
-            # Get high movement probability based on the areas (moving averages)
-            high_movement_proba = detect_high_movement(areas)  # Check the probability for high movement
- 
-            # Decision making based on the current state and calculated features
-            if status == 'FS':
-                action = get_action('hold_short',area, trend_value, high_movement_proba)
-                if action == 'exit_short':
-                    if entry_price > exit_price:
-                        if mode == 'R':
-                            closeShort(client, amount, Ti)
-                        print("trade closed : ", Ti, entry_price, exit_price, 'W')
-                        keys_to_remove.append(Ti)
-                    else:
-                        if mode == 'R':
-                            closeShort(client, amount, Ti)
-                        print("trade closed : ", Ti, entry_price, exit_price, 'L')
-                        keys_to_remove.append(Ti)
-                    reward('hold_short', action, entry_price, exit_price)
-                    save_q_table(q_table)
-    
-            if status == 'FL':
-                action = get_action('hold_long', area, trend_value, high_movement_proba)
-                if action == 'exit_long':
-                    if entry_price < exit_price:
-                        if mode == 'R':
-                            closeLong(client, amount, Ti)
-                        print("trade closed : ", Ti, entry_price, exit_price, 'W')
-                        keys_to_remove.append(Ti)
-                    else:
-                        if mode == 'R':
-                            closeLong(client, amount, Ti)
-                        print("trade closed : ", Ti, entry_price, exit_price, 'L')
-                        keys_to_remove.append(Ti)
-                    reward('hold_long', action, entry_price, exit_price)
-                    save_q_table(q_table)
-    
-        # Remove all elements corresponding to the keys in the list
-        for key in keys_to_remove:
-            TradeLog.pop(key, None)
+                df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume',
+                    'taker_buy_quote_asset_volume']] = df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume',
+                                                           'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']].astype(float)
+                exit_price = df['close'].iloc[-1]
+                areas, trend_direction = prepare_features(df)
+                area = areas.iloc[-1]  # Get the moving average value
+                trend_value = trend_direction.iloc[-1]  # Get the trend direction (1 for uptrend, -1 for downtrend)
+                # Get high movement probability based on the areas (moving averages)
+                high_movement_proba = detect_high_movement(areas)  # Check the probability for high movement
+                # Decision making based on the current state and calculated features
+                if status == 'FS':
+                    action,confidence = get_action('hold_short',area, trend_value, high_movement_proba)
+                    if action == 'exit_short' and confidence>0.5:
+                        if entry_price > exit_price:
+                            if mode == 'R':
+                                closeShort(client, amount, Ti)
+                            print("trade closed : ", Ti, entry_price, exit_price, 'W')
+                            keys_to_remove.append(Ti)
+                        else:
+                            if mode == 'R':
+                                closeShort(client, amount, Ti)
+                            print("trade closed : ", Ti, entry_price, exit_price, 'L')
+                            keys_to_remove.append(Ti)
+                        reward('hold_short', action, entry_price, exit_price)
+                        save_q_table(q_table)
         
-        if len(avoidlist)>=10:
-            print("avoidlist full reseting")
-            avoidlist=[]
-            
+                if status == 'FL':
+                    action,confidence  = get_action('hold_long', area, trend_value, high_movement_proba)
+                    if action == 'exit_long' and confidence>0.5:
+                        if entry_price < exit_price:
+                            if mode == 'R':
+                                closeLong(client, amount, Ti)
+                            print("trade closed : ", Ti, entry_price, exit_price, 'W')
+                            keys_to_remove.append(Ti)
+                        else:
+                            if mode == 'R':
+                                closeLong(client, amount, Ti)
+                            print("trade closed : ", Ti, entry_price, exit_price, 'L')
+                            keys_to_remove.append(Ti)
+                        reward('hold_long', action, entry_price, exit_price)
+                        save_q_table(q_table)
+        
+            # Remove all elements corresponding to the keys in the list
+            for key in keys_to_remove:
+                TradeLog.pop(key, None)
+       
         sleep(900)
    
        
