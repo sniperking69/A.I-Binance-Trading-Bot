@@ -103,20 +103,21 @@ class PredRNNpp(nn.Module):
 
 def marketDaysImage():
     """
-    Creates daily market matrices from token price changes and saves them as images.
-    Each matrix represents one day, where each pixel is a token's fractional price change.
+    Creates 8-hour market matrices from token price changes and saves them as images.
+    Each matrix represents one 8-hour period, where each pixel is a token's fractional price change.
     Tokens are arranged in alphabetical order in a square matrix.
-    
+
     Returns:
-        tuple: (day_matrices, dates)
-        - day_matrices: dict with dates as keys and numpy arrays (matrices) as values
+        tuple: (period_matrices, dates, tokens)
+        - period_matrices: dict with dates as keys and numpy arrays (matrices) as values
         - dates: list of dates in chronological order
+        - tokens: list of token symbols in order
     """
     # Initialize Binance client
     client = Client(api_key, api_secret)
     exInfo = client.futures_exchange_info()
     tokens = sorted([symbol["symbol"] for symbol in exInfo["symbols"]
-                    if symbol["contractType"] == "PERPETUAL" and "USDT" in symbol["symbol"] 
+                    if symbol["contractType"] == "PERPETUAL" and "USDT" in symbol["symbol"]
                     and symbol["status"] == "TRADING"])
 
     # Create square grid dimensions
@@ -131,14 +132,13 @@ def marketDaysImage():
     # Fetch data for each token
     for symbol in tokens:
         try:
-            candles = client.futures_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_1DAY, limit=1500)
+            candles = client.futures_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_8HOUR, limit=1500)
             df = pd.DataFrame(candles, columns=[
                 "open_time", "open", "high", "low", "close", "volume",
                 "close_time", "quote_asset_volume", "number_of_trades",
                 "taker_buy_base_asset_volume", "taker_buy_quote_asset_volume", "ignore"
             ])
-            # Fix date conversion
-            df["date"] = pd.to_datetime(df["open_time"].astype(int), unit='ms').dt.strftime('%Y-%m-%d')
+            df["date"] = pd.to_datetime(df["open_time"].astype(int), unit='ms').dt.strftime('%Y-%m-%d %H:%M')
             df["open"] = df["open"].astype(float)
             df["close"] = df["close"].astype(float)
             df["pct_change"] = ((df["close"] - df["open"]) / df["open"]) * 100
@@ -151,36 +151,36 @@ def marketDaysImage():
             continue
 
     # Create global date index and sort
-    all_dates = sorted(list(all_dates))
+    all_dates = sorted(list(set(all_dates)))
 
     # Reindex all token data to global date index
     for symbol in tokens:
         if symbol in token_data:
             token_data[symbol] = token_data[symbol].reindex(all_dates, fill_value=0)
 
-    day_matrices = {}
+    period_matrices = {}
     for date in all_dates:
-        day_pct = [token_data[symbol].loc[date, "pct_change"] for symbol in tokens]
-        if len(day_pct) < total_cells:
-            day_pct += [0] * (total_cells - len(day_pct))
-        matrix = np.array(day_pct).reshape((grid_size, grid_size))
-        day_matrices[date] = matrix
+        period_pct = [token_data[symbol].loc[date, "pct_change"] for symbol in tokens]
+        if len(period_pct) < total_cells:
+            period_pct += [0] * (total_cells - len(period_pct))
+        matrix = np.array(period_pct).reshape((grid_size, grid_size))
+        period_matrices[date] = matrix
 
-    return day_matrices, all_dates, tokens
+    return period_matrices, all_dates, tokens
 
-def train_pred_rnn(day_matrices, all_dates, num_epochs=100, batch_size=32, model_path='pred_rnn_model.pth'):
+def train_pred_rnn(period_matrices, all_dates, num_epochs=100, batch_size=32, model_path='pred_rnn_model.pth'):
     import os
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     torch.cuda.empty_cache()  # Clear GPU cache
 
     # Convert matrices to tensor
-    matrices = [day_matrices[date] for date in all_dates]
+    matrices = [period_matrices[date] for date in all_dates]
     matrices = np.array(matrices)
     matrices = matrices[:, np.newaxis, :, :]
 
     # Prepare sequences with batching
-    seq_length = 10
+    seq_length = 10  # 10 periods = 80 hours = 3.33 days
     sequences = []
     for i in range(len(matrices) - seq_length):
         sequences.append(matrices[i:i+seq_length+1])  # input: seq_length, target: next frame
@@ -190,8 +190,8 @@ def train_pred_rnn(day_matrices, all_dates, num_epochs=100, batch_size=32, model
     # Create DataLoader for batching
     dataset = torch.utils.data.TensorDataset(sequences)
     dataloader = torch.utils.data.DataLoader(
-        dataset, 
-        batch_size=batch_size, 
+        dataset,
+        batch_size=batch_size,
         shuffle=True,
         pin_memory=True
     )
@@ -213,7 +213,6 @@ def train_pred_rnn(day_matrices, all_dates, num_epochs=100, batch_size=32, model
     if os.path.exists(model_path):
         try:
             checkpoint = torch.load(model_path, map_location=device)
-            # Only load if the architecture matches
             model.load_state_dict(checkpoint)
             print(f"Loaded model from {model_path}, continuing training.")
         except Exception as e:
@@ -258,11 +257,10 @@ def train_pred_rnn(day_matrices, all_dates, num_epochs=100, batch_size=32, model
 
     return model
 
-
-def disp_predict(day_matrices, all_dates, model_path, num_layers=4, num_hidden=128):
+def disp_predict(period_matrices, all_dates, model_path, num_layers=4, num_hidden=128):
     """
-    Loads the model, predicts the upcoming day (T+1) using the latest days, 
-    saves the last 100 actual days as images, and saves the prediction as well.
+    Loads the model, predicts the upcoming period (T+1, next 8 hours) using the latest periods,
+    saves the last 100 actual periods as images, and saves the prediction as well.
     """
     import os
     import matplotlib.pyplot as plt
@@ -271,7 +269,12 @@ def disp_predict(day_matrices, all_dates, model_path, num_layers=4, num_hidden=1
     import torch
     import numpy as np
 
-    os.makedirs("diagram", exist_ok=True)
+    print("Current working directory:", os.getcwd())
+    # Ensure the diagram directory exists (use absolute path)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    diagram_dir = os.path.join(script_dir, "diagram")
+    os.makedirs(diagram_dir, exist_ok=True)
+
     custom_cmap = LinearSegmentedColormap.from_list(
         "smooth_red_black_green",
         [
@@ -283,19 +286,23 @@ def disp_predict(day_matrices, all_dates, model_path, num_layers=4, num_hidden=1
         ]
     )
 
-    # --- Save last 100 actual days as images ---
+    # --- Save last 100 actual periods as images ---
     for date in all_dates[-100:]:
-        matrix = day_matrices[date]
+        matrix = period_matrices[date]
         plt.figure(figsize=(6, 6))
         plt.imshow(matrix, cmap=custom_cmap, interpolation='nearest', vmin=-1, vmax=1)
         plt.title(f"Actual {date}")
         plt.axis('off')
         plt.tight_layout()
-        plt.savefig(f"diagram/actual_{date}.png")
-        plt.close()
+        safe_date = date.replace(':', '-')
+        try:
+            plt.savefig(os.path.join(diagram_dir, f"actual_{safe_date}.png"))
+        except Exception as e:
+            print(f"Error saving image for {date}: {e}")
+        plt.close()  # <-- Add this line
 
     # Load model
-    width = list(day_matrices.values())[0].shape[0]
+    width = list(period_matrices.values())[0].shape[0]
     in_channel = 1
     out_channel = 1
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -304,39 +311,40 @@ def disp_predict(day_matrices, all_dates, model_path, num_layers=4, num_hidden=1
     model.load_state_dict(checkpoint)
     model.eval()
 
-    # Prepare matrices for prediction (use last 10 days)
+    # Prepare matrices for prediction (use last 10 periods)
     last_dates = all_dates[-10:]
-    matrices = np.array([day_matrices[d] for d in last_dates])[:, np.newaxis, :, :]
+    matrices = np.array([period_matrices[d] for d in last_dates])[:, np.newaxis, :, :]
     matrices = torch.FloatTensor(matrices).to(device)
 
     with torch.no_grad():
-        # Predict the next day (T+1) using the last 10 days
-        pred_next, _ = model(matrices.unsqueeze(0))  # input: days 0-9, predict day 10
+        # Predict the next period (T+1, next 8 hours) using the last 10 periods
+        pred_next, _ = model(matrices.unsqueeze(0))  # input: periods 0-9, predict period 10
         pred_next = pred_next[:, -1, 0].cpu().numpy().squeeze()
 
-    # Save predicted upcoming day
+    # Save predicted upcoming period
     latest_date = all_dates[-1]
-    next_date = (datetime.strptime(latest_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+    next_date = (datetime.strptime(latest_date, "%Y-%m-%d %H:%M") + pd.Timedelta(hours=8)).strftime("%Y-%m-%d %H:%M")
     plt.figure(figsize=(6, 6))
     plt.imshow(pred_next, cmap=custom_cmap, interpolation='nearest', vmin=-1, vmax=1)
     plt.title(f"Predicted {next_date}")
     plt.axis('off')
     plt.tight_layout()
-    plt.savefig(f"diagram/predicted_{next_date}.png")
+    safe_next_date = next_date.replace(':', '-')
+    plt.savefig(os.path.join(diagram_dir, f"predicted_{safe_next_date}.png"))
     plt.close()
-    print(f"Saved last 100 actual days and prediction for {next_date} to 'diagram/' folder.")
+    print(f"Saved last 100 actual periods and prediction for {next_date} to 'diagram/' folder.")
 
 # -- Script entry point --
 if __name__ == "__main__":
-    day_matrices, all_dates, tokens = marketDaysImage()
+    period_matrices, all_dates, tokens = marketDaysImage()
     # --- Set model parameters here to match your checkpoint ---
     num_layers = 4
     num_hidden = 128
-    model = train_pred_rnn(day_matrices, all_dates, num_epochs=100, batch_size=32, model_path='pred_rnn_model.pth')
+    model = train_pred_rnn(period_matrices, all_dates, num_epochs=10, batch_size=32, model_path='pred_rnn_model.pth')
 
     # Save model
     torch.save(model.state_dict(), 'pred_rnn_model.pth')
     print("Model saved as pred_rnn_model.pth")
 
     # Save visualizations and print accuracy
-    disp_predict(day_matrices, all_dates, 'pred_rnn_model.pth', num_layers=num_layers, num_hidden=num_hidden)
+    disp_predict(period_matrices, all_dates, 'pred_rnn_model.pth', num_layers=num_layers, num_hidden=num_hidden)
