@@ -338,9 +338,9 @@ def disp_predict(period_matrices, all_dates, model_path, num_layers=4, num_hidde
 if __name__ == "__main__":
     period_matrices, all_dates, tokens = marketDaysImage()
     # --- Set model parameters here to match your checkpoint ---
-    num_layers = 4
+    num_layers =1
     num_hidden = 128
-    model = train_pred_rnn(period_matrices, all_dates, num_epochs=10, batch_size=32, model_path='pred_rnn_model.pth')
+    model = train_pred_rnn(period_matrices, all_dates, num_epochs=1, batch_size=32, model_path='pred_rnn_s.pth')
 
     # Save model
     torch.save(model.state_dict(), 'pred_rnn_model.pth')
