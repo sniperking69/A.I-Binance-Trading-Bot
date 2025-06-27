@@ -11,10 +11,21 @@ import os
 import gc
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
+import warnings
+import multiprocessing
+
+# Suppress FutureWarning and UserWarning for pin_memory
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", message=".*pin_memory.*no accelerator is found.*", category=UserWarning)
+
+# Detect total CPU cores
+num_cores = multiprocessing.cpu_count()
+torch.set_num_threads(num_cores)
+os.environ['OMP_NUM_THREADS'] = str(num_cores)
 
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:1024'
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"Using device: {device}")
+print(f"Using device: {device} with {num_cores} CPU threads")
 if torch.cuda.is_available():
     print(f"GPU: {torch.cuda.get_device_name()}")
 
@@ -132,7 +143,7 @@ def marketDaysImage():
     # Fetch data for each token
     for symbol in tokens:
         try:
-            candles = client.futures_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_8HOUR, limit=1500)
+            candles = client.futures_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_8HOUR, limit=1500) # 30 periods = 240 hours = 10 days orginal was 1500
             df = pd.DataFrame(candles, columns=[
                 "open_time", "open", "high", "low", "close", "volume",
                 "close_time", "quote_asset_volume", "number_of_trades",
@@ -168,7 +179,7 @@ def marketDaysImage():
 
     return period_matrices, all_dates, tokens
 
-def train_pred_rnn(period_matrices, all_dates, num_epochs=100, batch_size=32, model_path='pred_rnn_model.pth'):
+def train_pred_rnn(period_matrices, all_dates, num_epochs=1000, batch_size=32, model_path='pred_rnn_model.pth'):
     import os
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -187,13 +198,19 @@ def train_pred_rnn(period_matrices, all_dates, num_epochs=100, batch_size=32, mo
 
     sequences = torch.FloatTensor(np.array(sequences))
 
+    # Set pin_memory only if using CUDA
+    pin_memory = torch.cuda.is_available()
+    # Set number of workers to 0 (original setting)
+    num_workers = 0
+
     # Create DataLoader for batching
     dataset = torch.utils.data.TensorDataset(sequences)
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=True,
-        pin_memory=True
+        pin_memory=pin_memory,
+        num_workers=num_workers
     )
 
     # Model parameters
@@ -212,7 +229,7 @@ def train_pred_rnn(period_matrices, all_dates, num_epochs=100, batch_size=32, mo
     # Try to load checkpoint if exists and shape matches
     if os.path.exists(model_path):
         try:
-            checkpoint = torch.load(model_path, map_location=device)
+            checkpoint = torch.load(model_path, map_location=device, weights_only=True)
             model.load_state_dict(checkpoint)
             print(f"Loaded model from {model_path}, continuing training.")
         except Exception as e:
@@ -248,10 +265,10 @@ def train_pred_rnn(period_matrices, all_dates, num_epochs=100, batch_size=32, mo
             total_loss += loss.item()
 
         avg_loss = total_loss / len(dataloader)
-        print(f"Epoch [{epoch+1}/{num_epochs}], Avg Loss: {avg_loss:.4f}")
 
-        # Save checkpoint every 10 epochs
+        # Print and save checkpoint every 10 epochs
         if (epoch + 1) % 10 == 0:
+            print(f"Epoch [{epoch+1}/{num_epochs}], Avg Loss: {avg_loss:.4f}")
             torch.save(model.state_dict(), model_path)
             print(f"Checkpoint saved at epoch {epoch+1}")
 
@@ -307,7 +324,7 @@ def disp_predict(period_matrices, all_dates, model_path, num_layers=4, num_hidde
     out_channel = 1
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = PredRNNpp(num_layers, num_hidden, in_channel, out_channel, width).to(device)
-    checkpoint = torch.load(model_path, map_location=device)
+    checkpoint = torch.load(model_path, map_location=device, weights_only=True)
     model.load_state_dict(checkpoint)
     model.eval()
 
@@ -337,14 +354,15 @@ def disp_predict(period_matrices, all_dates, model_path, num_layers=4, num_hidde
 # -- Script entry point --
 if __name__ == "__main__":
     period_matrices, all_dates, tokens = marketDaysImage()
-    # --- Set model parameters here to match your checkpoint ---
-    num_layers =1
+    # --- Set model parameters here to match your checkpoint ----
+    # ---- parameters for server : batch size 4 and epochs 10 and limit 100---
+    num_layers = 4
     num_hidden = 128
-    model = train_pred_rnn(period_matrices, all_dates, num_epochs=1, batch_size=32, model_path='pred_rnn_s.pth')
+    model = train_pred_rnn(period_matrices, all_dates, num_epochs=200, batch_size=32, model_path='pred_rnn_model.pth')
 
     # Save model
     torch.save(model.state_dict(), 'pred_rnn_model.pth')
     print("Model saved as pred_rnn_model.pth")
 
     # Save visualizations and print accuracy
-    disp_predict(period_matrices, all_dates, 'pred_rnn_model.pth', num_layers=num_layers, num_hidden=num_hidden)
+    #disp_predict(period_matrices, all_dates, 'pred_rnn_model.pth', num_layers=num_layers, num_hidden=num_hidden)

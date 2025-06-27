@@ -13,70 +13,54 @@ from stonevision import PredRNNpp
 # --- Config ---
 model_path = "pred_rnn_model.pth"
 num_layers = 4
-num_hidden = 128  # Updated to match stonevision.py
+num_hidden = 128
 in_channel = 1
 out_channel = 1
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-max_positions = 5  # <-- Set this manually
-mode = 'S'  # 'S' for simulation, 'R' for real trading
+signal_mode = "both"  # Options: "reversal", "trend", "both"
+max_positions = 5
+mode = 'R'  # 'S' for simulation, 'R' for real trading
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 client = Client(api_key, api_secret)
 
 def get_tokens():
     exInfo = client.futures_exchange_info()
-    tokens = sorted([
-        symbol["symbol"] for symbol in exInfo["symbols"]
-        if symbol["contractType"] == "PERPETUAL"
-        and "USDT" in symbol["symbol"]
-        and symbol["status"] == "TRADING"
+    return sorted([
+        s["symbol"] for s in exInfo["symbols"]
+        if s["contractType"] == "PERPETUAL" and "USDT" in s["symbol"] and s["status"] == "TRADING"
     ])
-    return tokens
 
 def get_token_matrix(tokens, periods=20):
-    token_data = {}
-    all_dates = set()
+    token_data, all_dates = {}, set()
     for symbol in tokens:
         try:
-            # Use 8-hour interval to match stonevision.py
             candles = client.futures_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_8HOUR, limit=periods)
-            df = pd.DataFrame(candles, columns=[
-                "open_time", "open", "high", "low", "close", "volume",
-                "close_time", "quote_asset_volume", "number_of_trades",
-                "taker_buy_base_asset_volume", "taker_buy_quote_asset_volume", "ignore"
-            ])
+            df = pd.DataFrame(candles, columns=["open_time", "open", "high", "low", "close", "volume", "close_time",
+                                                "quote_asset_volume", "number_of_trades", "taker_buy_base_asset_volume",
+                                                "taker_buy_quote_asset_volume", "ignore"])
             df["date"] = pd.to_datetime(df["open_time"].astype(int), unit='ms').dt.strftime('%Y-%m-%d %H:%M')
-            df["open"] = df["open"].astype(float)
-            df["close"] = df["close"].astype(float)
-            df["pct_change"] = ((df["close"] - df["open"]) / df["open"]) * 100
+            df["pct_change"] = ((df["close"].astype(float) - df["open"].astype(float)) / df["open"].astype(float)) * 100
             df = df.set_index("date")
             token_data[symbol] = df["pct_change"]
             all_dates.update(df.index)
-        except Exception as e:
-            print(f"Error fetching {symbol}: {e}")
+        except:
             continue
     all_dates = sorted(list(all_dates))[-periods:]
-    num_tokens = len(tokens)
-    grid_size = math.ceil(math.sqrt(num_tokens))
-    total_cells = grid_size * grid_size
+    print("Last 2 complete candle timestamps:", all_dates[-2:])
+    grid_size = math.ceil(math.sqrt(len(tokens)))
     matrices = []
     for date in all_dates:
-        period_pct = [token_data.get(symbol, pd.Series()).get(date, 0) for symbol in tokens]
-        if len(period_pct) < total_cells:
-            period_pct += [0] * (total_cells - len(period_pct))
-        matrix = np.array(period_pct).reshape(grid_size, grid_size)
-        matrices.append(matrix)
+        row = [token_data.get(sym, pd.Series()).get(date, 0) for sym in tokens]
+        row += [0] * (grid_size ** 2 - len(row))
+        matrices.append(np.array(row).reshape(grid_size, grid_size))
     return np.array(matrices), tokens, grid_size
 
 def place_order(client, symbol, side, quantity, precision, mode, reduce_only=False):
     if mode == 'R':
         try:
             order = client.futures_create_order(
-                symbol=symbol,
-                type=ORDER_TYPE_MARKET,
-                side=side,
-                quantity=quantity,
-                reduceOnly=reduce_only
-            )
+                symbol=symbol, type=ORDER_TYPE_MARKET, side=side,
+                quantity=quantity, reduceOnly=reduce_only)
             print(f"Order placed: {symbol}, {side}, Qty: {quantity}, Order ID: {order['orderId']}")
             return order
         except BinanceAPIException as e:
@@ -87,143 +71,112 @@ def place_order(client, symbol, side, quantity, precision, mode, reduce_only=Fal
         return {'symbol': symbol, 'side': side, 'executedQty': str(quantity)}
 
 def truncate(number, precision):
-    factor = 10.0 ** precision
-    return int(number * factor) / factor
+    return int(number * (10 ** precision)) / (10 ** precision)
 
-def get_active_positions(client):
-    try:
-        positions = client.futures_position_information()
-        return {pos['symbol']: float(pos['positionAmt']) for pos in positions if float(pos['positionAmt']) != 0}
-    except Exception:
-        print("Error fetching positions.")
-        return {}
+def get_active_positions():
+    return {p['symbol']: float(p['positionAmt']) for p in client.futures_position_information() if float(p['positionAmt']) != 0}
 
 def get_token_info():
     exInfo = client.futures_exchange_info()
     return {
-        symbol["symbol"]: {
-            "quantityPrecision": symbol["quantityPrecision"],
-            "minNotional": float(next(f["notional"] for f in symbol["filters"] if f["filterType"] == "MIN_NOTIONAL"))
-        }
-        for symbol in exInfo["symbols"]
-        if symbol["contractType"] == "PERPETUAL" and "USDT" in symbol["symbol"] and symbol["status"] == "TRADING"
+        s["symbol"]: {
+            "quantityPrecision": s["quantityPrecision"],
+            "minNotional": float(next(f["notional"] for f in s["filters"] if f["filterType"] == "MIN_NOTIONAL"))
+        } for s in exInfo["symbols"] if s["contractType"] == "PERPETUAL" and "USDT" in s["symbol"] and s["status"] == "TRADING"
     }
 
-def get_futures_balance(client):
-    try:
-        balances = client.futures_account_balance()
-        for asset in balances:
-            if asset['asset'] == 'USDT':
-                return float(asset['balance'])
-    except Exception as e:
-        print(f"Error fetching futures balance: {e}")
+def get_futures_balance():
+    for asset in client.futures_account_balance():
+        if asset['asset'] == 'USDT':
+            return float(asset['balance'])
     return 0.0
 
-def close_position(client, symbol, mode):
+def close_position(symbol):
     try:
-        pos_info = client.futures_position_information(symbol=symbol)
-        amt = float(pos_info[0]['positionAmt'])
-        if amt == 0:
-            return
+        amt = float(client.futures_position_information(symbol=symbol)[0]['positionAmt'])
+        if amt == 0: return
         side = SIDE_SELL if amt > 0 else SIDE_BUY
         qty = abs(amt)
-        precision = 2  # Default, will try to get from token info
-        tinfo = get_token_info()
-        if symbol in tinfo:
-            precision = tinfo[symbol]['quantityPrecision']
-        qty = truncate(qty, precision)
-        if qty > 0:
-            print(f"Closing position for {symbol}: {side}, Qty: {qty}")
-            place_order(client, symbol, side, qty, precision, mode, reduce_only=True)
-    except Exception as e:
-        print(f"Error closing position for {symbol}: {e}")
+        precision = get_token_info()[symbol]["quantityPrecision"]
+        place_order(client, symbol, side, truncate(qty, precision), precision, mode, reduce_only=True)
+    except: pass
 
-def Lsafe(client, symbol, mrgType="ISOLATED", lvrg=2):
+def Lsafe(symbol, mrgType="ISOLATED", lvrg=2):
     try:
         client.futures_change_leverage(symbol=symbol, leverage=lvrg)
         client.futures_change_margin_type(symbol=symbol, marginType=mrgType)
     except Exception as e:
-        # Suppress "No need to change margin type" error
-        if "-4046" in str(e) or "No need to change margin type" in str(e):
-            pass  # Do not print this error
-        else:
-            print(f"Lsafe error for {symbol}: {str(e)}")
+        if "-4046" not in str(e): print(f"Lsafe error: {e}")
 
 if __name__ == "__main__":
     tokens = get_tokens()
     tinfo = get_token_info()
-    matrices, tokens, width = get_token_matrix(tokens, periods=20)  # 20 periods = 160 hours = ~6.7 days
+    matrices, tokens, width = get_token_matrix(tokens, periods=20)
+    if matrices.shape[0] < 10:
+        print("Not enough data.")
+        exit(0)
 
-    model = PredRNNpp(num_layers, num_hidden, in_channel, out_channel, width)
-    model.load_state_dict(torch.load(model_path, map_location=device))
-    model.to(device)
+    model = PredRNNpp(num_layers, num_hidden, in_channel, out_channel, width).to(device)
+    model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
     model.eval()
     print("Model loaded.")
 
-    # Close all active positions before opening new ones
-    active_positions = get_active_positions(client)
-    for symbol in active_positions:
-        close_position(client, symbol, mode)
+    print(f"Most recent actual candle (completed): {tokens[0]} @ {datetime.utcnow()} UTC")
+
+    for symbol in get_active_positions():
+        close_position(symbol)
     print("All positions closed.")
 
-    total_balance = get_futures_balance(client)
-    allocation_balance = total_balance * 0.6
-    matrices, tokens, width = get_token_matrix(tokens, periods=20)
-    if matrices.shape[0] < 20:
-        print("Not enough historical data for prediction. Got:", matrices.shape[0])
-        exit(0)
+    balance = get_futures_balance()
+    allocation = balance * 0.6
 
-    model.width = width
-    input_seq = matrices[:19]  # Use last 19 periods as input
+    input_seq = matrices[-10:]  # Use last 10 completed candles
     input_tensor = torch.FloatTensor(input_seq).unsqueeze(0).unsqueeze(2).to(device)
+
     with torch.no_grad():
         output_seq, _ = model(input_tensor)
         output_np = output_seq.squeeze(0).squeeze(1).cpu().numpy()
-    if output_np.shape[0] < 2:
-        print("Model did not return enough predictions.")
-        exit(0)
 
-    pred_next = output_np[-1]  # T+1 prediction (next 8h)
-    actual_current = matrices[9]   # T (latest actual, 10th 8h period)
+    pred_next = output_np[-1]            # T+1 predicted candle (future)
+    actual_current = input_seq[-1]       # T actual last complete candle
 
     pred_next_flat = pred_next.flatten()
     actual_current_flat = actual_current.flatten()
 
+    reversal_signals, trend_signals = [], []
+    for i, token in enumerate(tokens):
+        p, n = actual_current_flat[i], pred_next_flat[i]
+        if p < 0 and n > 0: reversal_signals.append((token, "LONG", p, n))
+        elif p > 0 and n < 0: reversal_signals.append((token, "SHORT", p, n))
+        if p > 0 and n > 0: trend_signals.append((token, "LONG", p, n))
+        elif p < 0 and n < 0: trend_signals.append((token, "SHORT", p, n))
+
     signals = []
-    for idx, token in enumerate(tokens):
-        prev_val = actual_current_flat[idx]
-        next_val = pred_next_flat[idx]
-        if prev_val < 0 and next_val > 0:
-            signals.append((token, "LONG", prev_val, next_val))
-        elif prev_val > 0 and next_val < 0:
-            signals.append((token, "SHORT", prev_val, next_val))
+    if signal_mode == "reversal":
+        signals = sorted(reversal_signals, key=lambda x: abs(x[3] - x[2]), reverse=True)
+    elif signal_mode == "trend":
+        signals = sorted(trend_signals, key=lambda x: abs(x[3] - x[2]), reverse=True)
+    elif signal_mode == "both":
+        reversal_sorted = sorted(reversal_signals, key=lambda x: abs(x[3] - x[2]), reverse=True)
+        trend_sorted = sorted(trend_signals, key=lambda x: abs(x[3] - x[2]), reverse=True)
+        signals = (reversal_sorted[:3] + trend_sorted[:2])[:max_positions]
 
-    signals = sorted(signals, key=lambda x: abs(x[3] - x[2]), reverse=True)
-
-    num_positions = min(max_positions, len(signals))
-    if num_positions > 0:
-        allocation_per_position = allocation_balance / num_positions
-        opened = 0
-        for token, direction, prev_val, next_val in signals[:num_positions]:
-            try:
-                raw_data = client.futures_klines(symbol=token, interval=Client.KLINE_INTERVAL_8HOUR, limit=1)
-                opprice = float(raw_data[-1][4])
-                precision = tinfo.get(token, {}).get("quantityPrecision", 2)
-                min_notional = tinfo.get(token, {}).get("minNotional", 5.0)
-                qty = truncate(allocation_per_position / opprice, precision)
-                notional = qty * opprice
-                if notional < min_notional:
-                    qty = truncate(min_notional / opprice, precision)
-                    notional = qty * opprice
-                side = SIDE_BUY if direction == "LONG" else SIDE_SELL
-
-                Lsafe(client, token, mrgType="ISOLATED", lvrg=2)
-
-                print(f"Placing {direction} order for {token}: Qty={qty}, Notional={notional:.2f}")
-                place_order(client, token, side, qty, precision, mode)
-                opened += 1
-            except Exception as e:
-                print(f"Order error for {token}: {str(e)}")
-        print(f"Opened {opened} positions.")
-    else:
+    if not signals:
         print("No signals to open positions.")
+        exit(0)
+
+    allocation_per = allocation / len(signals)
+    for token, direction, prev_val, next_val in signals:
+        try:
+            opprice = float(client.futures_klines(symbol=token, interval=Client.KLINE_INTERVAL_8HOUR, limit=1)[-1][4])
+            precision = tinfo[token]["quantityPrecision"]
+            min_notional = tinfo[token]["minNotional"]
+            qty = truncate(allocation_per / opprice, precision)
+            if qty * opprice < min_notional:
+                qty = truncate(min_notional / opprice, precision)
+            side = SIDE_BUY if direction == "LONG" else SIDE_SELL
+            Lsafe(token)
+            print(f"Placing {direction} for {token} Qty={qty} Notional={qty * opprice:.2f} | Change: {prev_val:.2f} → {next_val:.2f}")
+            place_order(client, token, side, qty, precision, mode)
+        except Exception as e:
+            print(f"Error placing order for {token}: {str(e)}")
