@@ -358,7 +358,7 @@ if __name__ == "__main__":
     # ---- parameters for server : batch size 4 and epochs 10 and limit 100---
     num_layers = 4
     num_hidden = 128
-    model = train_pred_rnn(period_matrices, all_dates, num_epochs=200, batch_size=32, model_path='pred_rnn_model.pth')
+    model = train_pred_rnn(period_matrices, all_dates, num_epochs=1, batch_size=54, model_path='pred_rnn_model.pth')
 
     # Save model
     torch.save(model.state_dict(), 'pred_rnn_model.pth')
