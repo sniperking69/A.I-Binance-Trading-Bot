@@ -13,7 +13,7 @@ from stonevision import PredRNNpp
 # --- Config ---
 model_path = "pred_rnn_model.pth"
 num_layers = 4
-num_hidden = 128
+num_hidden = 64
 in_channel = 1
 out_channel = 1
 signal_mode = "both"  # Options: "reversal", "trend", "both"
