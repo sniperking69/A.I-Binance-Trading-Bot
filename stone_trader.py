@@ -18,7 +18,7 @@ in_channel = 1
 out_channel = 1
 signal_mode = "both"  # Options: "reversal", "trend", "both"
 max_positions = 5
-mode = 'R'  # 'S' for simulation, 'R' for real trading
+mode = 'D'  # 'S' for simulation, 'R' for real trading
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 client = Client(api_key, api_secret)
