@@ -189,7 +189,7 @@ if __name__ == "__main__":
     pred_next_flat = pred_next.flatten()
     actual_current_flat = actual_current.flatten()
 
-    # --- Strength-based Signal Logic ---
+    # --- Adjusted Signal Logic ---
     flat_input = input_seq[-VOL_WINDOW:].reshape(-1)
     avg_volatility = np.std(flat_input)
 
@@ -200,17 +200,24 @@ if __name__ == "__main__":
             continue
         delta = abs(n - p)
         strength = delta / (avg_volatility + 1e-6)
-        direction = "LONG" if n > p else "SHORT"
-        signals.append((token, direction, p, n, strength))
 
-    signals_sorted = sorted(signals, key=lambda x: x[4], reverse=True)[:max_positions]
+        # Adjust prediction if signs of p and n differ
+        if (n > 0 and p > 0) or (n < 0 and p < 0):
+            adjusted_n = n
+        else:
+            adjusted_n = n + strength if n < 0 else n - strength
+
+        direction = "LONG" if adjusted_n > 0 else "SHORT"
+        signals.append((token, direction, p, n, strength, adjusted_n))
+
+    signals_sorted = sorted(signals, key=lambda x: abs(x[4]), reverse=True)[:max_positions]
 
     if not signals_sorted:
         print("No strong signals to open positions.")
         exit(0)
 
     allocation_per = allocation / len(signals_sorted)
-    for token, direction, prev_val, next_val, strength in signals_sorted:
+    for token, direction, prev_val, next_val, strength, adj_pred in signals_sorted:
         try:
             opprice = float(client.futures_klines(symbol=token, interval=Client.KLINE_INTERVAL_4HOUR, limit=1)[-1][4])
             precision = tinfo[token]["quantityPrecision"]
@@ -220,7 +227,7 @@ if __name__ == "__main__":
                 qty = truncate(min_notional / opprice, precision)
             side = SIDE_BUY if direction == "LONG" else SIDE_SELL
             Lsafe(token)
-            print(f"[{direction}] {token}: Prev={prev_val:.2f}%, Pred={next_val:.2f}%, Strength={strength:.2f}")
+            print(f"[{direction}] {token}: Prev={prev_val:.2f}%, Pred={next_val:.2f}%, AdjPred={adj_pred:.2f}%, Strength={strength:.2f}")
             print(f"Placing {direction} for {token} Qty={qty} Notional={qty * opprice:.2f}")
             place_order(client, token, side, qty, precision, mode)
             traded_buffer[token] = datetime.now(timezone.utc)
