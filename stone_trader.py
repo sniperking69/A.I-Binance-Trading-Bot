@@ -1,7 +1,6 @@
 import torch
 import numpy as np
 import pandas as pd
-import math
 from binance.client import Client
 from binance.enums import *
 from binance.exceptions import BinanceAPIException
@@ -21,14 +20,14 @@ grid_size = 28  # Fixed grid size for consistency
 max_positions = 5
 mode = 'S'  # 'S' for simulation, 'R' for real trading
 
-# --- New Parameters for upgraded logic ---
+# --- Parameters ---
 THRESHOLD = 1  # Minimum predicted % change to consider a signal
 VOL_WINDOW = 5   # Number of frames (4h each) to compute volatility = 20 hours
+TRADED_BUFFER_FILE = "traded_buffer.json"
 
 # --- Device & API ---
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 client = Client(api_key, api_secret)
-TRADED_BUFFER_FILE = "traded_buffer.json"
 
 # --- Helpers ---
 def load_traded_buffer():
@@ -86,6 +85,23 @@ def get_current_price_change(symbol):
         print(f"Failed to get current price change for {symbol}: {e}")
         return None
 
+def get_current_winrate():
+    try:
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        income = client.futures_income_history(incomeType='REALIZED_PNL', limit=1000)
+        today_income = [
+            i for i in income
+            if i['incomeType'] == 'REALIZED_PNL' and i['time'] >= int(datetime.strptime(today, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1000)
+        ]
+        wins = sum(1 for i in today_income if float(i['income']) > 0)
+        total = len(today_income)
+        if total == 0:
+            return 0.5  # Neutral if no trades
+        return wins / total
+    except Exception as e:
+        print(f"Error fetching winrate: {e}")
+        return 0.5
+
 def place_order(client, symbol, side, quantity, precision, mode, reduce_only=False):
     if mode == 'R':
         try:
@@ -127,9 +143,8 @@ def close_position(symbol):
         amt = float(client.futures_position_information(symbol=symbol)[0]['positionAmt'])
         if amt == 0: return
         side = SIDE_SELL if amt > 0 else SIDE_BUY
-        qty = abs(amt)
         precision = get_token_info()[symbol]["quantityPrecision"]
-        place_order(client, symbol, side, truncate(qty, precision), precision, mode, reduce_only=True)
+        place_order(client, symbol, side, truncate(abs(amt), precision), precision, mode, reduce_only=True)
     except: pass
 
 def Lsafe(symbol, mrgType="ISOLATED", lvrg=2):
@@ -146,6 +161,9 @@ if __name__ == "__main__":
     traded_buffer = load_traded_buffer()
     now = datetime.now(timezone.utc)
 
+    WINRATE = get_current_winrate()
+    print(f"Today's winrate (from Binance): {WINRATE*100:.2f}%")
+
     eligible_tokens = [t for t in tokens if t not in traded_buffer or (now - traded_buffer[t]) > timedelta(hours=24)]
     if not eligible_tokens:
         print("No eligible tokens to trade (all in 24h buffer).")
@@ -160,8 +178,6 @@ if __name__ == "__main__":
     model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
     model.eval()
     print("Model loaded.")
-
-    print(f"Most recent actual candle (completed): {tokens[0]} @ {datetime.now(timezone.utc)} UTC")
 
     for symbol in get_active_positions():
         close_position(symbol)
@@ -180,7 +196,6 @@ if __name__ == "__main__":
     pred_next = output_np[-1]
     actual_current = input_seq[-1].copy()
 
-    # Apply real-time % change to actual_current
     for i, token in enumerate(tokens):
         current_change = get_current_price_change(token)
         if current_change is not None:
@@ -189,35 +204,50 @@ if __name__ == "__main__":
     pred_next_flat = pred_next.flatten()
     actual_current_flat = actual_current.flatten()
 
-    # --- Adjusted Signal Logic ---
     flat_input = input_seq[-VOL_WINDOW:].reshape(-1)
     avg_volatility = np.std(flat_input)
 
+    per_token_volatility = np.std(input_seq[-VOL_WINDOW:], axis=0).flatten()
+
     signals = []
+    momentum_weights = []
+    model_weights = []
+
     for i, token in enumerate(tokens):
         p, n = actual_current_flat[i], pred_next_flat[i]
         if abs(n) < THRESHOLD:
             continue
         delta = abs(n - p)
-        strength = delta / (avg_volatility + 1e-6)
-
-        # Adjust prediction if signs of p and n differ
-        if (n > 0 and p > 0) or (n < 0 and p < 0):
-            adjusted_n = n
-        else:
-            adjusted_n = n + strength if n < 0 else n - strength
-
+        strength = min(delta / (avg_volatility + 1e-6), 1.0)  # Scale strength to 0–1
+        pivot = WINRATE - strength
+        adjusted_n = n + pivot if n < 0 else n - pivot
         direction = "LONG" if adjusted_n > 0 else "SHORT"
-        signals.append((token, direction, p, n, strength, adjusted_n))
 
-    signals_sorted = sorted(signals, key=lambda x: abs(x[4]), reverse=True)[:max_positions]
+        # Calculate weights
+        momentum_weight = WINRATE / (WINRATE + strength + 1e-6)
+        model_weight = 1.0 - momentum_weight
+        momentum_weights.append(momentum_weight)
+        model_weights.append(model_weight)
+
+        token_vol = per_token_volatility[i]
+        signals.append((token, direction, p, n, strength, pivot, adjusted_n, token_vol))
+
+    # Print average weights across all tokens
+    if momentum_weights:
+        avg_momentum_weight = np.mean(momentum_weights) * 100
+        avg_model_weight = np.mean(model_weights) * 100
+        print(f"\n🌐 Average Momentum Weight: {avg_momentum_weight:.2f}%, Model Weight: {avg_model_weight:.2f}%\n")
+    else:
+        print("\nNo tokens passed threshold for momentum/model weight calculation.\n")
+
+    signals_sorted = sorted(signals, key=lambda x: x[7], reverse=True)[:max_positions]
 
     if not signals_sorted:
         print("No strong signals to open positions.")
         exit(0)
 
     allocation_per = allocation / len(signals_sorted)
-    for token, direction, prev_val, next_val, strength, adj_pred in signals_sorted:
+    for token, direction, prev_val, next_val, strength, pivot_val, adj_pred, token_vol in signals_sorted:
         try:
             opprice = float(client.futures_klines(symbol=token, interval=Client.KLINE_INTERVAL_4HOUR, limit=1)[-1][4])
             precision = tinfo[token]["quantityPrecision"]
@@ -227,7 +257,7 @@ if __name__ == "__main__":
                 qty = truncate(min_notional / opprice, precision)
             side = SIDE_BUY if direction == "LONG" else SIDE_SELL
             Lsafe(token)
-            print(f"[{direction}] {token}: Prev={prev_val:.2f}%, Pred={next_val:.2f}%, AdjPred={adj_pred:.2f}%, Strength={strength:.2f}")
+            print(f"[{direction}] {token}: Prev={prev_val:.2f}%, Pred={next_val:.2f}%, Strength={strength:.4f}, Pivot={pivot_val:.4f}, AdjPred={adj_pred:.2f}%")
             print(f"Placing {direction} for {token} Qty={qty} Notional={qty * opprice:.2f}")
             place_order(client, token, side, qty, precision, mode)
             traded_buffer[token] = datetime.now(timezone.utc)
@@ -235,6 +265,6 @@ if __name__ == "__main__":
             print(f"Error placing order for {token}: {str(e)}")
 
     for token in list(traded_buffer.keys()):
-        if (now - traded_buffer[token]) > timedelta(hours=24):
+        if (now - traded_buffer[token]) > timedelta(hours=12):
             del traded_buffer[token]
     save_traded_buffer(traded_buffer)
