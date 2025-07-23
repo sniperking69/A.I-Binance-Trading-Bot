@@ -14,15 +14,11 @@ from stonevision import PredRNNpp
 model_path = "pred_rnn_model.pth"
 num_layers = 4
 num_hidden = 128
-in_channel = 1
-out_channel = 1
-grid_size = 28  # Fixed grid size for consistency
+in_channel = 2   # z_open + z_close input
+out_channel = 1  # predict z_close
+grid_size = 28
 max_positions = 5
-mode = 'S'  # 'S' for simulation, 'R' for real trading
-
-# --- Parameters ---
-THRESHOLD = 1  # Minimum predicted % change to consider a signal
-VOL_WINDOW = 5   # Number of frames (4h each) to compute volatility = 20 hours
+mode = 'S'  # 'S'=Simulation, 'R'=Real Trading
 TRADED_BUFFER_FILE = "traded_buffer.json"
 
 # --- Device & API ---
@@ -49,58 +45,50 @@ def get_tokens():
         if s["contractType"] == "PERPETUAL" and "USDT" in s["symbol"] and s["status"] == "TRADING"
     ])
 
-def get_token_matrix(tokens, periods=20):
+def get_token_matrix(tokens, periods=40):
     token_data, all_dates = {}, set()
     for symbol in tokens:
         try:
-            candles = client.futures_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_4HOUR, limit=periods)
+            candles = client.futures_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_1HOUR, limit=periods)
             df = pd.DataFrame(candles, columns=["open_time", "open", "high", "low", "close", "volume",
                                                 "close_time", "quote_asset_volume", "number_of_trades",
                                                 "taker_buy_base_asset_volume", "taker_buy_quote_asset_volume", "ignore"])
             df["date"] = pd.to_datetime(df["open_time"].astype(int), unit='ms').dt.strftime('%Y-%m-%d %H:%M')
-            df["pct_change"] = ((df["close"].astype(float) - df["open"].astype(float)) / df["open"].astype(float)) * 100
+            df["open"] = df["open"].astype(float)
+            df["close"] = df["close"].astype(float)
+            df["z_open"] = (df["open"] - df["open"].mean()) / (df["open"].std() + 1e-6)
+            df["z_close"] = (df["close"] - df["close"].mean()) / (df["close"].std() + 1e-6)
+            df["pct_change"] = df["close"].pct_change() * 100  # Percent change
             df = df.set_index("date")
-            token_data[symbol] = df["pct_change"]
+            token_data[symbol] = df[["z_open", "z_close", "pct_change"]]
             all_dates.update(df.index)
         except:
             continue
     all_dates = sorted(list(all_dates))[-periods:]
     print("Last 2 complete candle timestamps:", all_dates[-2:])
+
     total_cells = grid_size ** 2
     matrices = []
     for date in all_dates:
-        row = [token_data.get(sym, pd.Series()).get(date, 0) for sym in tokens]
-        row += [0] * (total_cells - len(row))
-        matrix = np.array(row).reshape(grid_size, grid_size)
+        z_open = [token_data.get(sym, pd.DataFrame()).get("z_open", pd.Series()).get(date, 0) for sym in tokens]
+        z_close = [token_data.get(sym, pd.DataFrame()).get("z_close", pd.Series()).get(date, 0) for sym in tokens]
+        z_open += [0] * (total_cells - len(z_open))
+        z_close += [0] * (total_cells - len(z_close))
+        matrix = np.stack([np.array(z_open).reshape(grid_size, grid_size),
+                           np.array(z_close).reshape(grid_size, grid_size)], axis=0)
         matrices.append(matrix)
-    return np.array(matrices), tokens
+    return np.array(matrices), tokens, token_data
 
-def get_current_price_change(symbol):
-    try:
-        candles = client.futures_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_4HOUR, limit=1)
-        open_price = float(candles[-1][1])
-        current_price = float(client.futures_mark_price(symbol=symbol)['markPrice'])
-        return ((current_price - open_price) / open_price) * 100
-    except Exception as e:
-        print(f"Failed to get current price change for {symbol}: {e}")
-        return None
-
-def get_current_winrate():
-    try:
-        today = datetime.utcnow().strftime("%Y-%m-%d")
-        income = client.futures_income_history(incomeType='REALIZED_PNL', limit=1000)
-        today_income = [
-            i for i in income
-            if i['incomeType'] == 'REALIZED_PNL' and i['time'] >= int(datetime.strptime(today, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1000)
-        ]
-        wins = sum(1 for i in today_income if float(i['income']) > 0)
-        total = len(today_income)
-        if total == 0:
-            return 0.5  # Neutral if no trades
-        return wins / total
-    except Exception as e:
-        print(f"Error fetching winrate: {e}")
-        return 0.5
+def compute_volatility(token_data, tokens):
+    vol_dict = {}
+    for token in tokens:
+        try:
+            last_changes = token_data[token]["pct_change"].dropna().iloc[-4:]
+            volatility = np.std(last_changes)
+            vol_dict[token] = volatility
+        except:
+            vol_dict[token] = 0
+    return vol_dict
 
 def place_order(client, symbol, side, quantity, precision, mode, reduce_only=False):
     if mode == 'R':
@@ -143,8 +131,9 @@ def close_position(symbol):
         amt = float(client.futures_position_information(symbol=symbol)[0]['positionAmt'])
         if amt == 0: return
         side = SIDE_SELL if amt > 0 else SIDE_BUY
+        qty = abs(amt)
         precision = get_token_info()[symbol]["quantityPrecision"]
-        place_order(client, symbol, side, truncate(abs(amt), precision), precision, mode, reduce_only=True)
+        place_order(client, symbol, side, truncate(qty, precision), precision, mode, reduce_only=True)
     except: pass
 
 def Lsafe(symbol, mrgType="ISOLATED", lvrg=2):
@@ -161,18 +150,17 @@ if __name__ == "__main__":
     traded_buffer = load_traded_buffer()
     now = datetime.now(timezone.utc)
 
-    WINRATE = get_current_winrate()
-    print(f"Today's winrate (from Binance): {WINRATE*100:.2f}%")
-
-    eligible_tokens = [t for t in tokens if t not in traded_buffer or (now - traded_buffer[t]) > timedelta(hours=24)]
+    eligible_tokens = [t for t in tokens if t not in traded_buffer or (now - traded_buffer[t]) > timedelta(hours=4)]
     if not eligible_tokens:
-        print("No eligible tokens to trade (all in 24h buffer).")
+        print("No eligible tokens to trade (all in 4h buffer).")
         exit(0)
 
-    matrices, tokens = get_token_matrix(eligible_tokens, periods=20)
+    matrices, tokens, token_data = get_token_matrix(eligible_tokens, periods=40)
     if matrices.shape[0] < 10:
         print("Not enough data.")
         exit(0)
+
+    volatility_map = compute_volatility(token_data, tokens)
 
     model = PredRNNpp(num_layers, num_hidden, in_channel, out_channel, grid_size).to(device)
     model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
@@ -187,69 +175,35 @@ if __name__ == "__main__":
     allocation = balance * 0.6
 
     input_seq = matrices[-10:]
-    input_tensor = torch.FloatTensor(input_seq).unsqueeze(0).unsqueeze(2).to(device)
+    input_tensor = torch.FloatTensor(input_seq).unsqueeze(0).to(device)
 
     with torch.no_grad():
-        output_seq, _ = model(input_tensor)
-        output_np = output_seq.squeeze(0).squeeze(1).cpu().numpy()
+        output_seq = model(input_tensor)
+        pred_next = output_seq.squeeze(0).cpu().numpy()
 
-    pred_next = output_np[-1]
-    actual_current = input_seq[-1].copy()
-
-    for i, token in enumerate(tokens):
-        current_change = get_current_price_change(token)
-        if current_change is not None:
-            actual_current.flat[i] = current_change
-
-    pred_next_flat = pred_next.flatten()
-    actual_current_flat = actual_current.flatten()
-
-    flat_input = input_seq[-VOL_WINDOW:].reshape(-1)
-    avg_volatility = np.std(flat_input)
-
-    per_token_volatility = np.std(input_seq[-VOL_WINDOW:], axis=0).flatten()
+    avg_pred_next = np.mean(pred_next[-4:], axis=0)
+    avg_pred_flat = avg_pred_next.flatten()
 
     signals = []
-    momentum_weights = []
-    model_weights = []
-
     for i, token in enumerate(tokens):
-        p, n = actual_current_flat[i], pred_next_flat[i]
-        if abs(n) < THRESHOLD:
+        avg_z = avg_pred_flat[i]
+        volatility = volatility_map.get(token, 0)
+        if abs(avg_z) < 0.5:  # Ignore weak signals
             continue
-        delta = abs(n - p)
-        strength = min(delta / (avg_volatility + 1e-6), 1.0)  # Scale strength to 0–1
-        pivot = WINRATE - strength
-        adjusted_n = n + pivot if n < 0 else n - pivot
-        direction = "LONG" if adjusted_n > 0 else "SHORT"
+        score = abs(avg_z) * volatility  # Combined strength
+        direction = "LONG" if avg_z > 0 else "SHORT"
+        signals.append((token, direction, avg_z, volatility, score))
 
-        # Calculate weights
-        momentum_weight = WINRATE / (WINRATE + strength + 1e-6)
-        model_weight = 1.0 - momentum_weight
-        momentum_weights.append(momentum_weight)
-        model_weights.append(model_weight)
-
-        token_vol = per_token_volatility[i]
-        signals.append((token, direction, p, n, strength, pivot, adjusted_n, token_vol))
-
-    # Print average weights across all tokens
-    if momentum_weights:
-        avg_momentum_weight = np.mean(momentum_weights) * 100
-        avg_model_weight = np.mean(model_weights) * 100
-        print(f"\n🌐 Average Momentum Weight: {avg_momentum_weight:.2f}%, Model Weight: {avg_model_weight:.2f}%\n")
-    else:
-        print("\nNo tokens passed threshold for momentum/model weight calculation.\n")
-
-    signals_sorted = sorted(signals, key=lambda x: x[7], reverse=True)[:max_positions]
+    signals_sorted = sorted(signals, key=lambda x: x[4], reverse=True)[:max_positions]
 
     if not signals_sorted:
         print("No strong signals to open positions.")
         exit(0)
 
     allocation_per = allocation / len(signals_sorted)
-    for token, direction, prev_val, next_val, strength, pivot_val, adj_pred, token_vol in signals_sorted:
+    for token, direction, zscore, vol, score in signals_sorted:
         try:
-            opprice = float(client.futures_klines(symbol=token, interval=Client.KLINE_INTERVAL_4HOUR, limit=1)[-1][4])
+            opprice = float(client.futures_klines(symbol=token, interval=Client.KLINE_INTERVAL_1HOUR, limit=1)[-1][4])
             precision = tinfo[token]["quantityPrecision"]
             min_notional = tinfo[token]["minNotional"]
             qty = truncate(allocation_per / opprice, precision)
@@ -257,7 +211,7 @@ if __name__ == "__main__":
                 qty = truncate(min_notional / opprice, precision)
             side = SIDE_BUY if direction == "LONG" else SIDE_SELL
             Lsafe(token)
-            print(f"[{direction}] {token}: Prev={prev_val:.2f}%, Pred={next_val:.2f}%, Strength={strength:.4f}, Pivot={pivot_val:.4f}, AdjPred={adj_pred:.2f}%")
+            print(f"[{direction}] {token}: Avg Z-Score={zscore:.2f}, Volatility={vol:.2f}, Score={score:.2f}")
             print(f"Placing {direction} for {token} Qty={qty} Notional={qty * opprice:.2f}")
             place_order(client, token, side, qty, precision, mode)
             traded_buffer[token] = datetime.now(timezone.utc)
@@ -265,6 +219,6 @@ if __name__ == "__main__":
             print(f"Error placing order for {token}: {str(e)}")
 
     for token in list(traded_buffer.keys()):
-        if (now - traded_buffer[token]) > timedelta(hours=12):
+        if (now - traded_buffer[token]) > timedelta(hours=4):
             del traded_buffer[token]
     save_traded_buffer(traded_buffer)
