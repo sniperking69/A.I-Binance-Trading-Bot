@@ -7,6 +7,7 @@ from binance.exceptions import BinanceAPIException
 from datetime import datetime, timedelta, timezone
 import os
 import json
+from time import sleep
 from keys import api_key, api_secret
 from stonevision import PredRNNpp
 
@@ -17,7 +18,7 @@ num_hidden = 128
 in_channel = 2   # z_open + z_close input
 out_channel = 1  # predict z_close
 grid_size = 28
-max_positions = 5
+max_positions = 8
 mode = 'S'  # 'S'=Simulation, 'R'=Real Trading
 TRADED_BUFFER_FILE = "traded_buffer.json"
 
@@ -62,6 +63,7 @@ def get_token_matrix(tokens, periods=40):
             df = df.set_index("date")
             token_data[symbol] = df[["z_open", "z_close", "pct_change"]]
             all_dates.update(df.index)
+            sleep(0.2)
         except:
             continue
     all_dates = sorted(list(all_dates))[-periods:]
@@ -150,7 +152,7 @@ if __name__ == "__main__":
     traded_buffer = load_traded_buffer()
     now = datetime.now(timezone.utc)
 
-    eligible_tokens = [t for t in tokens if t not in traded_buffer or (now - traded_buffer[t]) > timedelta(hours=4)]
+    eligible_tokens = [t for t in tokens if t not in traded_buffer or (now - traded_buffer[t]) > timedelta(hours=12)]
     if not eligible_tokens:
         print("No eligible tokens to trade (all in 4h buffer).")
         exit(0)
@@ -215,10 +217,11 @@ if __name__ == "__main__":
             print(f"Placing {direction} for {token} Qty={qty} Notional={qty * opprice:.2f}")
             place_order(client, token, side, qty, precision, mode)
             traded_buffer[token] = datetime.now(timezone.utc)
+            sleep(0.2)
         except Exception as e:
             print(f"Error placing order for {token}: {str(e)}")
 
     for token in list(traded_buffer.keys()):
-        if (now - traded_buffer[token]) > timedelta(hours=4):
+        if (now - traded_buffer[token]) > timedelta(hours=12):
             del traded_buffer[token]
     save_traded_buffer(traded_buffer)
