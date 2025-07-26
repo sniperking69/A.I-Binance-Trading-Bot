@@ -189,5 +189,5 @@ def train_pred_rnn(period_matrices, all_dates, num_grand_epochs=10, chunk_size=1
 
 if __name__ == "__main__":
     matrices, dates, tokens = marketDaysImage()
-    model = train_pred_rnn(matrices, dates, num_grand_epochs=1000, chunk_size=12, batch_size=12, model_path='pred_rnn_model.pth')
+    model = train_pred_rnn(matrices, dates, num_grand_epochs=1, chunk_size=12, batch_size=6, model_path='pred_rnn_model.pth')
     print("🏁 Training complete and model saved.")
