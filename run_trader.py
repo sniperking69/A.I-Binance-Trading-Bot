@@ -19,5 +19,5 @@ while True:
         else:
             print("✅ Trading cycle complete.", flush=True)
 
-    print("🕒 Sleeping for 8 hours...\n", flush=True)
-    time.sleep(8 * 60 * 60)
+    print("🕒 Sleeping for 4 hours...\n", flush=True)
+    time.sleep(4 * 60 * 60)
